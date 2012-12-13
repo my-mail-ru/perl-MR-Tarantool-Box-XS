@@ -314,12 +314,17 @@ uint32_t tbxs_fetch_want_result(HV *request) {
     return (val && SvTRUE(*val)) ? WANT_RESULT : 0;
 }
 
+bool tbxs_fetch_raw(HV *request) {
+    SV **val = hv_fetch(request, "raw", 3, 0);
+    return val ? SvTRUE(*val) : false;
+}
+
 tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, tbns_t *ns, SV *errsv) {
     SV **val;
     uint32_t namespace = tbxs_fetch_namespace(request, ns);
 
     uint32_t index;
-    if ((val = hv_fetch(request, "index", 5, 0))) {
+    if ((val = hv_fetch(request, "use_index", 9, 0))) {
         if (SvIOK(*val)) {
             index = SvUV(*val);
         } else if (SvPOK(*val)) {
@@ -330,12 +335,12 @@ tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, tbns_t *ns, SV *e
                 croak("no such index: \"%s\"", name);
             index = SvUV(*val);
         } else {
-            croak("\"index\" shouls be a string or an integer");
+            croak("\"use_index\" shouls be a string or an integer");
         }
     } else if (ns) {
         index = ns->default_index;
     } else {
-        croak("\"index\" should be specified");
+        croak("\"use_index\" should be specified");
     }
 
     uint32_t offset = 0;
@@ -369,9 +374,6 @@ tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, tbns_t *ns, SV *e
     if (keys == NULL) return NULL;
     tarantoolbox_message_t *message = tarantoolbox_select_init(namespace, index, keys, offset, limit);
     tarantoolbox_tuples_free(keys);
-    iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
-    iproto_message_opts_t *opts = iproto_message_options(imessage);
-    iprotoxs_parse_opts(opts, request);
     return message;
 }
 
@@ -402,19 +404,19 @@ void tbxs_select_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *
         }
     }
 
-    AV *hash_by = NULL;
+    SV *hash_by = NULL;
     if (ns && (val = hv_fetch(request, "hash_by", 7, 0))) {
-        if (!SvPOK(*val))
-            croak("\"hash_by\" should be a string");
-        STRLEN hashlen;
-        char *hash = SvPV(*val, hashlen);
-        val = hv_fetch(ns->index_id_by_name, hash, hashlen, 0);
-        if (!val)
-            croak("no such index: \"%s\"", hash);
-        val = av_fetch(ns->indexes, SvIV(*val), 0);
-        if (!val)
-            croak("no such index: \"%s\"", hash);
-        hash_by = (AV *)SvRV(*val);
+        if (SvPOK(*val)) {
+            HE *he = hv_fetch_ent(ns->field_id_by_name, *val, 0, 0);
+            if (!he) croak("no such field: \"%s\"", SvPV_nolen(*val));
+            hash_by = HeVAL(he);
+        } else if (SvIOK(*val)) {
+            if (SvIV(*val) > av_len(ns->fields))
+                croak("field %"IVdf" is out of range", SvIV(*val));
+            hash_by = *val;
+        } else {
+            croak("\"hash_by\" should be a string or an integer");
+        }
     }
 
     SV *tuplessv;
@@ -424,31 +426,22 @@ void tbxs_select_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *
         tuplessv = (SV *)newAV();
         av_extend((AV *)tuplessv, ntuples - 1);
     }
+    bool make_hash = fields && !tbxs_fetch_raw(request);
     for (uint32_t i = 0; i < ntuples; i++) {
         AV *tupleav = tbxs_tuple_to_av(tarantoolbox_tuples_get_tuple(tuples, i), format);
 
         SV *tuplesv;
-        if (fields) {
+        if (make_hash) {
             tuplesv = (SV *)tbxs_tuple_av_to_hv(tupleav, fields);
         } else {
             tuplesv = (SV *)tupleav;
         }
 
         if (hash_by) {
-            SV *sep = get_sv(";", 0);
-            SV *key = newSVpv("", 0);
-            for (I32 j = 0; j <= av_len(hash_by); j++) {
-                val = av_fetch(hash_by, j, 0);
-                IV id = SvIV(*val);
-                if (id >= ntuples)
-                    croak("tuple is too short to contain \"hash_by\" keys");
-                val = av_fetch(tupleav, id, 0);
-                if (j > 0)
-                    sv_catsv(key, sep);
-                sv_catsv(key, *val);
-            }
-            hv_store_ent((HV *)tuplessv, key, newRV_noinc(tuplesv), 0);
-            SvREFCNT_dec(key);
+            IV id = SvIV(hash_by);
+            val = av_fetch(tupleav, id, 0);
+            if (!val) croak("tuple is too short to contain \"hash_by\" keys");
+            hv_store_ent((HV *)tuplessv, *val, newRV_noinc(tuplesv), 0);
         } else {
             av_store((AV *)tuplessv, i, newRV_noinc(tuplesv));
         }
@@ -629,7 +622,13 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbns_t *ns, SV *er
 
 tarantoolbox_message_t *tbxs_update_hv_to_message(HV *request, tbns_t *ns, SV *errsv) {
     uint32_t namespace = tbxs_fetch_namespace(request, ns);
-    uint32_t flags = tbxs_fetch_want_result(request);;
+    uint32_t flags = tbxs_fetch_want_result(request);
+    SV **val;
+    if ((val = hv_fetch(request, "_flags", 6, 0))) {
+        if (!SvIOK(*val))
+            croak("\"_flags\" should be an integer");
+        flags |= SvUV(*val);
+    }
     tarantoolbox_message_t *message = NULL;
     tarantoolbox_update_ops_t *ops = tbxs_fetch_update_ops(request, ns, errsv);
     if (ops) {
@@ -658,7 +657,7 @@ void tbxs_affected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
     if (tarantoolbox_tuples_has_tuples(tuples) && ntuples == 1) {
         AV *tupleav = tbxs_tuple_to_av(tarantoolbox_tuples_get_tuple(tuples, 0), ns->format);
-        SV *tuplesv = ns->fields ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->fields) : (SV *)tupleav;
+        SV *tuplesv = ns->fields && !tbxs_fetch_raw(request) ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->fields) : (SV *)tupleav;
         hv_store(result, "tuple", 5, newRV_noinc(tuplesv), 0);
     } else {
         hv_store(result, "tuple", 5, newSVuv(ntuples), 0);
@@ -671,18 +670,25 @@ tarantoolbox_message_t *tbxs_hv_to_message(HV *request, tbns_t *ns, SV *errsv) {
         croak("\"type\" is required");
     if (!SvPOK(*val))
         croak("\"type\" should be a string");
+    tarantoolbox_message_t *message;
     char *type = SvPV_nolen(*val);
     if (strcmp(type, "select") == 0) {
-        return tbxs_select_hv_to_message(request, ns, errsv);
+        message = tbxs_select_hv_to_message(request, ns, errsv);
     } else if (strcmp(type, "insert") == 0) {
-        return tbxs_insert_hv_to_message(request, ns, errsv);
+        message = tbxs_insert_hv_to_message(request, ns, errsv);
     } else if (strcmp(type, "update") == 0) {
-        return tbxs_update_hv_to_message(request, ns, errsv);
+        message = tbxs_update_hv_to_message(request, ns, errsv);
     } else if (strcmp(type, "delete") == 0) {
-        return tbxs_delete_hv_to_message(request, ns, errsv);
+        message = tbxs_delete_hv_to_message(request, ns, errsv);
     } else {
         croak("unknown message type: \"%s\"", type);
     }
+    if (message != NULL) {
+        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
+        iproto_message_opts_t *opts = iproto_message_options(imessage);
+        iprotoxs_parse_opts(opts, request);
+    }
+    return message;
 }
 
 HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, tbns_t *ns, SV *errsv) {

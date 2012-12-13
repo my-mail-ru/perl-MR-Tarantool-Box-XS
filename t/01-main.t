@@ -65,21 +65,21 @@ sub check_select {
     $resp = $dispatch->bulk([{
         type    => 'select',
         keys    => [1000011658, 1000011659],
-        hash_by => 'primary_id',
+        hash_by => 'ID',
     }]);
     is($resp->[0]->{tuples}->{1000011658}->{ID}, 1000011658, "select hash by id");
 
     $resp = $dispatch->bulk([{
         type    => 'select',
         keys    => [1000011658, 1000011659],
-        hash_by => 'primary_email',
+        hash_by => 'Email',
     }]);
     is($resp->[0]->{tuples}->{'kadabra100@mail.ru'}->{ID}, 1000011658, "select hash by email");
 
     $resp = $dispatch->bulk([{
-        type    => 'select',
-        index   => 'primary_email',
-        keys    => ['kadabra100@mail.ru', 'kadabra101@mail.ru'],
+        type      => 'select',
+        use_index => 'primary_email',
+        keys      => ['kadabra100@mail.ru', 'kadabra101@mail.ru'],
     }]);
     is($resp->[0]->{tuples}->[0]->{ID}, 1000011658, "select list by email");
 
