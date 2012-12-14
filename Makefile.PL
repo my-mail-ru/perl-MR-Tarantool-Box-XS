@@ -27,6 +27,6 @@ WriteMakefile(
 	# Un-comment this if you add C files to link with later:
     # OBJECT            => '$(O_FILES)', # link all the C files too
     CCFLAGS           => '-std=gnu99 -Wall -Werror',
-    OPTIMIZE          => '-g',
+    OPTIMIZE          => '-ggdb3',
     LDFROM            => "\$(OBJECT) $iprotoxsso",
 );
