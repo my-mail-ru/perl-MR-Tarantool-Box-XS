@@ -17,7 +17,7 @@ typedef struct {
 START_MY_CXT;
 
 typedef struct {
-    SV *iproto;
+    SV *cluster;
     uint32_t namespace;
     uint32_t default_index;
     AV *fields;
@@ -29,7 +29,7 @@ typedef struct {
     AV *index_fields;
 } tbns_t;
 
-typedef iproto_t * MR__IProto__XS;
+typedef iproto_cluster_t * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 
 void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
@@ -882,7 +882,7 @@ ns_new(klass, ...)
             croak("Odd number of elements in hash assignment");
         tbns_t *ns;
         Newxz(ns, 1, tbns_t);
-        bool has_iproto = false;
+        bool has_cluster = false;
         bool has_namespace = false;
         AV *indexes = NULL;
         for (int i = 1; i < items; i += 2) {
@@ -891,8 +891,8 @@ ns_new(klass, ...)
             if (strcmp(key, "iproto") == 0) {
                 if (!sv_derived_from(value, "MR::IProto::XS"))
                     croak("\"iproto\" is not of type MR::IProto::XS");
-                ns->iproto = SvREFCNT_inc(SvRV(value));
-                has_iproto = true;
+                ns->cluster = SvREFCNT_inc(SvRV(value));
+                has_cluster = true;
             } else if (strcmp(key, "namespace") == 0) {
                 if (!SvIOK(value))
                     croak("\"namespace\" should be an integer");
@@ -921,7 +921,7 @@ ns_new(klass, ...)
                 indexes = (AV *)SvRV(value);
             }
         }
-        if (!has_iproto)
+        if (!has_cluster)
             croak("\"iproto\" is required");
         if (!has_namespace)
             croak("\"namespace\" is required");
@@ -944,7 +944,7 @@ ns_DESTROY(namespace)
     CODE:
         if (singleton_call)
             croak("DESTROY is called as a class method");
-        SvREFCNT_dec(ns->iproto);
+        SvREFCNT_dec(ns->cluster);
         SvREFCNT_dec(ns->fields);
         SvREFCNT_dec(ns->field_id_by_name);
         SvREFCNT_dec(ns->format);
@@ -964,10 +964,11 @@ ns_remove_singleton(klass)
         RETVAL
 
 AV *
-ns_bulk(namespace, list)
+ns_bulk(namespace, list, ...)
         MR::Tarantool::Box::XS namespace
         AV *list
     CODE:
+        iprotoxs_call_timeout(timeout, 2);
         I32 listsize = av_len(list) + 1;
         tarantoolbox_message_t **messages;
         Newx(messages, listsize, tarantoolbox_message_t *);
@@ -984,12 +985,12 @@ ns_bulk(namespace, list)
                 messages[nmessages++] = message;
             }
         }
-        iproto_t *iproto = INT2PTR(iproto_t *, SvIV(ns->iproto));
+        iproto_cluster_t *cluster = INT2PTR(iproto_cluster_t *, SvIV(ns->cluster));
         iproto_message_t **imessages;
         Newx(imessages, nmessages, iproto_message_t *);
         for (uint32_t i = 0; i < nmessages; i++)
             imessages[i] = tarantoolbox_message_get_iproto_message(messages[i]);
-        iproto_bulk(iproto, imessages, nmessages, NULL);
+        iproto_cluster_bulk(cluster, imessages, nmessages, timeout);
         Safefree(imessages);
         AV *result = newAV();
         uint32_t j = 0;
@@ -1005,16 +1006,17 @@ ns_bulk(namespace, list)
         RETVAL
 
 HV *
-ns_do(namespace, request)
+ns_do(namespace, request, ...)
         MR::Tarantool::Box::XS namespace
         HV *request
     CODE:
+        iprotoxs_call_timeout(timeout, 2);
         SV *error = newSV(0);
         tarantoolbox_message_t *message = tbxs_hv_to_message(request, ns, error);
         if (message) {
-            iproto_t *iproto = INT2PTR(iproto_t *, SvIV(ns->iproto));
+            iproto_cluster_t *cluster = INT2PTR(iproto_cluster_t *, SvIV(ns->cluster));
             iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
-            iproto_do(iproto, imessage, NULL);
+            iproto_cluster_do(cluster, imessage, timeout);
         }
         HV *response = tbxs_message_to_hv(message, request, ns, error);
         RETVAL = (HV *)sv_2mortal((SV *)response);
