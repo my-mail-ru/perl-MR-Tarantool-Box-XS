@@ -298,7 +298,8 @@ uint32_t tbxs_fetch_namespace(HV *request, tbns_t *ns) {
     } else {
         SV **val = hv_fetch(request, "namespace", 9, 0);
         if (!val) croak("\"namespace\" should be specified");
-        if (!SvIOK(*val)) croak("\"namespace\" should be an integer");
+        if (!(SvIOK(*val) || looks_like_number(*val)))
+            croak("\"namespace\" should be an integer");
         return SvUV(*val);
     }
 }
@@ -345,13 +346,15 @@ tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, tbns_t *ns, SV *e
 
     uint32_t offset = 0;
     if ((val = hv_fetch(request, "offset", 6, 0))) {
-        if (!SvIOK(*val)) croak("\"offset\" should be an integer");
+        if (!(SvIOK(*val) || looks_like_number(*val)))
+            croak("\"offset\" should be an integer");
         offset = SvUV(*val);
     }
 
     uint32_t limit = 0;
     if ((val = hv_fetch(request, "limit", 5, 0))) {
-        if (!SvIOK(*val)) croak("\"limit\" should be an integer");
+        if (!(SvIOK(*val) || looks_like_number(*val)))
+            croak("\"limit\" should be an integer");
         limit = SvUV(*val);
     }
 
@@ -894,7 +897,7 @@ ns_new(klass, ...)
                 ns->cluster = SvREFCNT_inc(SvRV(value));
                 has_cluster = true;
             } else if (strcmp(key, "namespace") == 0) {
-                if (!SvIOK(value))
+                if (!(SvIOK(value) || looks_like_number(value)))
                     croak("\"namespace\" should be an integer");
                 ns->namespace = SvUV(value);
                 has_namespace = true;
