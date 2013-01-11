@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 63;
+use Test::More tests => 65;
 use Test::LeakTrace;
 use MR::IProto::XS;
 BEGIN { use_ok('MR::Tarantool::Box::XS') };
@@ -89,6 +89,27 @@ sub check_select {
     }]);
     is($resp->[0]->{tuples}->[0]->{ID}, 1000011658, "select by key in array");
     is($resp->[0]->{tuples}->[1]->{ID}, 1000011659, "select by key in hash");
+
+    check_replica_flag();
+    return;
+}
+
+sub check_replica_flag {
+    my $iproto = MR::IProto::XS->new(masters => ['10.0.0.1:9999'], replicas => ['188.93.61.206:13013']);
+    my $box = MR::Tarantool::Box::XS->new(
+        iproto    => $iproto,
+        namespace => 0,
+        format    => 'l& SSLL',
+        fields    => [qw/ID Email ShardNum HistoryShardNum Base Flags/],
+        indexes   => [
+            { name => 'primary_id', keys => ['ID'], default => 1 },
+            { name => 'primary_email', keys => ['Email'] },
+        ],
+    );
+    my $resp = $box->do({ type => 'select', keys => [ 1000011658 ] });
+    ok($resp->{replica}, "replica flag set");
+    $resp = $dispatch->do({ type => 'select', keys => [ 1000011658 ] });
+    ok(!$resp->{replica}, "replica flag unset");
     return;
 }
 
@@ -508,6 +529,7 @@ sub check_singleton {
 sub check_leak {
     no warnings 'redefine';
     local *main::is = sub {};
+    local *main::ok = sub {};
     local *main::cmp_ok = sub {};
     local *main::isa_ok = sub {};
     no_leaks_ok { check_select() } "select not leaks";
