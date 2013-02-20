@@ -2,10 +2,14 @@ use strict;
 use warnings;
 use Test::More tests => 65;
 use Test::LeakTrace;
+use Getopt::Long;
 use MR::IProto::XS;
 BEGIN { use_ok('MR::Tarantool::Box::XS') };
 use Encode;
 use utf8;
+
+my $range_check;
+GetOptions('range-check!' => \$range_check);
 
 my $TEST_ID = 1999999999;
 my $TEST2_ID = 1999999998;
@@ -359,104 +363,108 @@ sub check_pack {
     }]);
     is($resp->[0]->{tuple}, 1, "insert");
 
-    $resp = $ns->bulk([
+    SKIP: {
+        skip "range check", 12 unless $range_check;
+
+        my $resp = $ns->bulk([
+                {
+                    type => 'update',
+                    key  => $TEST3_ID,
+                    ops  => [ [ UInt32 => set => -1 ] ],
+                    want_result => 1,
+                },
+                {
+                    type => 'update',
+                    key  => $TEST3_ID,
+                    ops  => [ [ Int32 => set => -1 ] ],
+                    want_result => 1,
+                },
+        ]);
+        cmp_ok($resp->[0]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack uint32 < 0 - invalid request");
+        is($resp->[1]->{tuple}->{Int32}, -1, "pack int32 < 0 - ok");
+
+        $resp = $ns->bulk([
             {
                 type => 'update',
                 key  => $TEST3_ID,
-                ops  => [ [ UInt32 => set => -1 ] ],
+                ops  => [ [ UInt32 => set => 4294967295 ] ],
                 want_result => 1,
             },
             {
                 type => 'update',
                 key  => $TEST3_ID,
-                ops  => [ [ Int32 => set => -1 ] ],
+                ops  => [ [ Int32 => set => 4294967295 ] ],
                 want_result => 1,
             },
-    ]);
-    cmp_ok($resp->[0]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack uint32 < 0 - invalid request");
-    is($resp->[1]->{tuple}->{Int32}, -1, "pack int32 < 0 - ok");
+        ]);
+        is($resp->[0]->{tuple}->{UInt32}, 4294967295, "pack uint32 > INT32_MAX - ok");
+        cmp_ok($resp->[1]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int32 > INT32_MAX - invalid request");
 
-    $resp = $ns->bulk([
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ UInt32 => set => 4294967295 ] ],
-            want_result => 1,
-        },
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ Int32 => set => 4294967295 ] ],
-            want_result => 1,
-        },
-    ]);
-    is($resp->[0]->{tuple}->{UInt32}, 4294967295, "pack uint32 > INT32_MAX - ok");
-    cmp_ok($resp->[1]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int32 > INT32_MAX - invalid request");
+        $resp = $ns->bulk([
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ UInt16 => set => -1 ] ],
+                want_result => 1,
+            },
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ Int16 => set => -1 ] ],
+                want_result => 1,
+            },
+        ]);
+        cmp_ok($resp->[0]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack uint16 < 0 - invalid request");
+        is($resp->[1]->{tuple}->{Int16}, -1, "pack int16 < 0 - ok");
 
-    $resp = $ns->bulk([
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ UInt16 => set => -1 ] ],
-            want_result => 1,
-        },
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ Int16 => set => -1 ] ],
-            want_result => 1,
-        },
-    ]);
-    cmp_ok($resp->[0]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack uint16 < 0 - invalid request");
-    is($resp->[1]->{tuple}->{Int16}, -1, "pack int16 < 0 - ok");
+        $resp = $ns->bulk([
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ UInt16 => set => 65535 ] ],
+                want_result => 1,
+            },
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ Int16 => set => 65535 ] ],
+                want_result => 1,
+            },
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ UInt16 => set => 65536 ] ],
+                want_result => 1,
+            },
+        ]);
+        is($resp->[0]->{tuple}->{UInt16}, 65535, "pack uint16 > INT16_MAX - ok");
+        cmp_ok($resp->[1]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int16 > INT16_MAX - invalid request");
+        cmp_ok($resp->[2]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int16 > UINT16_MAX - invalid request");
 
-    $resp = $ns->bulk([
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ UInt16 => set => 65535 ] ],
-            want_result => 1,
-        },
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ Int16 => set => 65535 ] ],
-            want_result => 1,
-        },
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ UInt16 => set => 65536 ] ],
-            want_result => 1,
-        },
-    ]);
-    is($resp->[0]->{tuple}->{UInt16}, 65535, "pack uint16 > INT16_MAX - ok");
-    cmp_ok($resp->[1]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int16 > INT16_MAX - invalid request");
-    cmp_ok($resp->[2]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int16 > UINT16_MAX - invalid request");
-
-    $resp = $ns->bulk([
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ UInt8 => set => 128 ] ],
-            want_result => 1,
-        },
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ Int8 => set => 128 ] ],
-            want_result => 1,
-        },
-        {
-            type => 'update',
-            key  => $TEST3_ID,
-            ops  => [ [ UInt8 => set => 256 ] ],
-            want_result => 1,
-        },
-    ]);
-    is($resp->[0]->{tuple}->{UInt8}, 128, "pack uint8 > INT8_MAX - ok");
-    cmp_ok($resp->[1]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int8 > INT8_MAX - invalid request");
-    cmp_ok($resp->[2]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int8 > UINT8_MAX - invalid request");
+        $resp = $ns->bulk([
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ UInt8 => set => 128 ] ],
+                want_result => 1,
+            },
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ Int8 => set => 128 ] ],
+                want_result => 1,
+            },
+            {
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ UInt8 => set => 256 ] ],
+                want_result => 1,
+            },
+        ]);
+        is($resp->[0]->{tuple}->{UInt8}, 128, "pack uint8 > INT8_MAX - ok");
+        cmp_ok($resp->[1]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int8 > INT8_MAX - invalid request");
+        cmp_ok($resp->[2]->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "pack int8 > UINT8_MAX - invalid request");
+    }
 
     $resp = $ns->bulk([
         {
@@ -532,6 +540,7 @@ sub check_leak {
     local *main::ok = sub {};
     local *main::cmp_ok = sub {};
     local *main::isa_ok = sub {};
+    local *main::skip = sub { no warnings 'exiting'; last SKIP };
     no_leaks_ok { check_select() } "select not leaks";
     no_leaks_ok { check_insert() } "insert not leaks";
     no_leaks_ok { check_update() } "update not leaks";
