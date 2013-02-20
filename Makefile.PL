@@ -2,7 +2,17 @@ use 5.008008;
 use strict;
 use warnings;
 use ExtUtils::MakeMaker;
+use Getopt::Long;
 use File::Spec;
+
+my $range_check;
+
+GetOptions(
+    'range-check!' => \$range_check,
+);
+
+my $define = join ' ',
+    $range_check ? '-DWITH_RANGE_CHECK' : ();
 
 my $tarantoolboxdir = '../box';
 my $iprotoxsso = eval {
@@ -22,7 +32,7 @@ WriteMakefile(
       (ABSTRACT_FROM  => 'lib/MR/Tarantool/Box/XS.pm', # retrieve abstract from module
        AUTHOR         => 'a.mashanov <a.mashanov@localdomain>') : ()),
     LIBS              => ['-ltarantoolbox'], # e.g., '-lm'
-    DEFINE            => '', # e.g., '-DHAVE_SOMETHING'
+    DEFINE            => $define, # e.g., '-DHAVE_SOMETHING'
     INC               => "",
 	# Un-comment this if you add C files to link with later:
     # OBJECT            => '$(O_FILES)', # link all the C files too

@@ -32,68 +32,61 @@ typedef struct {
 typedef iproto_cluster_t * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 
+#ifdef WITH_RANGE_CHECK
+#define tbxs_check_value(type, condition, data, errsv, pf, pv) \
+    do { \
+        if (!(condition)) { \
+            data = NULL; \
+            sv_setpvf(errsv, "value %"pf" is out of range for "#type, pv); \
+        } \
+    } while (0)
+#else
+#define tbxs_check_value(type, condition, data, errsv, pf, pv) \
+    do { \
+        if (!(condition)) { \
+            warn("value %"pf" is out of range for "#type, pv); \
+        } \
+    } while (0)
+#endif
+
 void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
     void *data;
     switch (format) {
         case 'L':
             SvUV(value);
-            if (SvIOK_UV(value) || SvUVX(value) <= INT32_MAX) {
-                data = &SvUVX(value);
-                *size = sizeof(uint32_t);
-            } else {
-                data = NULL;
-                sv_setpvf(errsv, "value %"IVdf" is out of range for uint32_t", SvIVX(value));
-            }
+            data = &SvUVX(value);
+            *size = sizeof(uint32_t);
+            tbxs_check_value(uint32_t, SvIOK_UV(value) || SvUVX(value) <= INT32_MAX, data, errsv, IVdf, SvIVX(value));
             break;
         case 'l':
             SvIV(value);
-            if (SvIOK_notUV(value) || SvIVX(value) >= 0) {
-                data = &SvIVX(value);
-                *size = sizeof(int32_t);
-            } else {
-                data = NULL;
-                sv_setpvf(errsv, "value %"UVuf" is out of range for int32_t", SvUVX(value));
-            }
+            data = &SvIVX(value);
+            *size = sizeof(int32_t);
+            tbxs_check_value(int32_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, UVuf, SvUVX(value));
             break;
         case 'S':
             SvUV(value);
-            if (SvUVX(value) <= UINT16_MAX) {
-                data = &SvUVX(value);
-                *size = sizeof(uint16_t);
-            } else {
-                data = NULL;
-                sv_setpvf(errsv, "value %"IVdf" is out of range for uint16_t", SvIVX(value));
-            }
+            data = &SvUVX(value);
+            *size = sizeof(uint16_t);
+            tbxs_check_value(uint16_t, SvUVX(value) <= UINT16_MAX, data, errsv, IVdf, SvIVX(value));
             break;
         case 's':
             SvIV(value);
-            if (SvIVX(value) >= INT16_MIN && SvIVX(value) <= INT16_MAX) {
-                data = &SvIVX(value);
-                *size = sizeof(int16_t);
-            } else {
-                data = NULL;
-                sv_setpvf(errsv, "value %"IVdf" is out of range for int16_t", SvIVX(value));
-            }
+            data = &SvIVX(value);
+            *size = sizeof(int16_t);
+            tbxs_check_value(int16_t, SvIVX(value) >= INT16_MIN && SvIVX(value) <= INT16_MAX, data, errsv, IVdf, SvIVX(value));
             break;
         case 'C':
             SvUV(value);
-            if (SvUVX(value) <= UINT8_MAX) {
-                data = &SvUVX(value);
-                *size = sizeof(uint8_t);
-            } else {
-                data = NULL;
-                sv_setpvf(errsv, "value %"IVdf" is out of range for uint8_t", SvIVX(value));
-            }
+            data = &SvUVX(value);
+            *size = sizeof(uint8_t);
+            tbxs_check_value(uint8_t, SvUVX(value) <= UINT8_MAX, data, errsv, IVdf, SvIVX(value));
             break;
         case 'c':
             SvIV(value);
-            if (SvIVX(value) >= INT8_MIN && SvIVX(value) <= INT8_MAX) {
-                data = &SvIVX(value);
-                *size = sizeof(int8_t);
-            } else {
-                data = NULL;
-                sv_setpvf(errsv, "value "IVdf" is out of range for int8_t", SvIVX(value));
-            }
+            data = &SvIVX(value);
+            *size = sizeof(int8_t);
+            tbxs_check_value(int8_t, SvIVX(value) >= INT8_MIN && SvIVX(value) <= INT8_MAX, data, errsv, IVdf, SvIVX(value));
             break;
         case '&':
         case '$':
