@@ -1,5 +1,5 @@
 TYPEMAP
-MR::IProto::XS         T_PTROBJ
+MR::IProto::XS         T_SV
 MR::Tarantool::Box::XS T_PTROBJ_NS
 
 INPUT

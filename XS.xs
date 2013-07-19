@@ -4,6 +4,11 @@
 
 #include "ppport.h"
 
+#ifdef WITH_MATH_INT64
+#define MATH_INT64_NATIVE_IF_AVAILABLE
+#include <perl_math_int64.h>
+#endif
+
 #include <tarantoolbox.h>
 #include <iprotoxs.h>
 #include <assert.h>
@@ -29,7 +34,7 @@ typedef struct {
     AV *index_fields;
 } tbns_t;
 
-typedef iproto_cluster_t * MR__IProto__XS;
+typedef SV * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 
 #ifdef WITH_RANGE_CHECK
@@ -52,17 +57,52 @@ typedef SV * MR__Tarantool__Box__XS;
 void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
     void *data;
     switch (format) {
+#ifdef WITH_MATH_INT64
+        case 'Q': {
+            uint64_t v = SvU64(value);
+            SV *tmp = sv_2mortal(newSVpvn((void *)&v, sizeof(uint64_t)));
+            data = SvPV(tmp, *size);
+            break;
+        }
+        case 'q': {
+            int64_t v = SvI64(value);
+            SV *tmp = sv_2mortal(newSVpvn((void *)&v, sizeof(int64_t)));
+            data = SvPV(tmp, *size);
+            break;
+        }
+#elif defined(HAS_QUAD) && IVSIZE >= I64SIZE
+        case 'Q':
+            SvUV(value);
+            data = &SvUVX(value);
+            *size = sizeof(uint64_t);
+            tbxs_check_value(uint64_t, SvIOK_UV(value) || SvUVX(value) <= INT64_MAX, data, errsv, IVdf, SvIVX(value));
+            break;
+        case 'q':
+            SvIV(value);
+            data = &SvIVX(value);
+            *size = sizeof(int64_t);
+            tbxs_check_value(int64_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, UVuf, SvUVX(value));
+            break;
+#endif
         case 'L':
             SvUV(value);
             data = &SvUVX(value);
             *size = sizeof(uint32_t);
+#if UVSIZE > U32SIZE
+            tbxs_check_value(uint32_t, SvUVX(value) <= UINT32_MAX, data, errsv, IVdf, SvIVX(value));
+#else
             tbxs_check_value(uint32_t, SvIOK_UV(value) || SvUVX(value) <= INT32_MAX, data, errsv, IVdf, SvIVX(value));
+#endif
             break;
         case 'l':
             SvIV(value);
             data = &SvIVX(value);
             *size = sizeof(int32_t);
+#if IVSIZE > I32SIZE
+            tbxs_check_value(int32_t, SvIVX(value) >= INT32_MIN && SvIVX(value) <= INT32_MAX, data, errsv, IVdf, SvIVX(value));
+#else
             tbxs_check_value(int32_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, UVuf, SvUVX(value));
+#endif
             break;
         case 'S':
             SvUV(value);
@@ -102,6 +142,21 @@ void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
 SV *tbxs_field_to_sv(char format, void *data, size_t size) {
     SV *sv;
     switch (format) {
+#ifdef WITH_MATH_INT64
+        case 'Q':
+            sv = newSVu64(*(uint64_t *)data);
+            break;
+        case 'q':
+            sv = newSVi64(*(int64_t *)data);
+            break;
+#elif defined(HAS_QUAD) && IVSIZE >= I64SIZE
+        case 'Q':
+            sv = newSVuv(*(uint64_t *)data);
+            break;
+        case 'q':
+            sv = newSViv(*(int64_t *)data);
+            break;
+#endif
         case 'L':
             sv = newSVuv(*(uint32_t *)data);
             break;
@@ -850,17 +905,16 @@ BOOT:
         SvIOK_on(sv); \
         newCONSTSUB(stash, #s, sv); \
     } while (0);
-    TBXS_CONST(ERR_CODE_OK);
-    LIBIPROTO_ERROR_CODES(TBXS_CONST);
-    IPROTO_ERROR_CODES(TBXS_CONST);
-    TARANTOOLBOX_ERROR_CODES(TBXS_CONST);
+    TARANTOOLBOX_ALL_ERROR_CODES(TBXS_CONST);
 #undef TBXS_CONST
 #define TBXS_CONST(s, ...) newCONSTSUB(stash, #s, newSVuv(s));
-    IPROTO_LOGMASK(TBXS_CONST);
     TARANTOOLBOX_LOGMASK(TBXS_CONST);
 #undef TBXS_CONST
     MY_CXT_INIT;
     MY_CXT.namespaces = newHV();
+#ifdef WITH_MATH_INT64
+    PERL_MATH_INT64_LOAD_OR_CROAK;
+#endif
 
 void
 ns_set_logmask(klass, mask)
@@ -887,7 +941,7 @@ ns_new(klass, ...)
             if (strcmp(key, "iproto") == 0) {
                 if (!sv_derived_from(value, "MR::IProto::XS"))
                     croak("\"iproto\" is not of type MR::IProto::XS");
-                ns->cluster = SvREFCNT_inc(SvRV(value));
+                ns->cluster = SvREFCNT_inc(value);
                 has_cluster = true;
             } else if (strcmp(key, "namespace") == 0) {
                 if (!(SvIOK(value) || looks_like_number(value)))
@@ -981,7 +1035,7 @@ ns_bulk(namespace, list, ...)
                 messages[nmessages++] = message;
             }
         }
-        iproto_cluster_t *cluster = INT2PTR(iproto_cluster_t *, SvIV(ns->cluster));
+        iproto_cluster_t *cluster = INT2PTR(iproto_cluster_t *, SvIV(SvRV(ns->cluster)));
         iproto_message_t **imessages;
         Newx(imessages, nmessages, iproto_message_t *);
         for (uint32_t i = 0; i < nmessages; i++)
@@ -1010,7 +1064,7 @@ ns_do(namespace, request, ...)
         SV *error = newSV(0);
         tarantoolbox_message_t *message = tbxs_hv_to_message(request, ns, error);
         if (message) {
-            iproto_cluster_t *cluster = INT2PTR(iproto_cluster_t *, SvIV(ns->cluster));
+            iproto_cluster_t *cluster = INT2PTR(iproto_cluster_t *, SvIV(SvRV(ns->cluster)));
             iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
             iproto_cluster_do(cluster, imessage, timeout);
         }
@@ -1019,3 +1073,10 @@ ns_do(namespace, request, ...)
     OUTPUT:
         RETVAL
 
+MR::IProto::XS
+ns_iproto(namespace)
+        MR::Tarantool::Box::XS namespace
+    CODE:
+        RETVAL = SvREFCNT_inc(ns->cluster);
+    OUTPUT:
+        RETVAL

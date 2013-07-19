@@ -4,15 +4,19 @@ use warnings;
 use ExtUtils::MakeMaker;
 use Getopt::Long;
 use File::Spec;
+use Config;
 
 my $range_check;
+my $math_int64;
 
 GetOptions(
     'range-check!' => \$range_check,
+    'math-int64!'  => \$math_int64,
 );
 
 my $define = join ' ',
-    $range_check ? '-DWITH_RANGE_CHECK' : ();
+    $range_check ? '-DWITH_RANGE_CHECK' : (),
+    $math_int64 ? '-DWITH_MATH_INT64' : ();
 
 my $tarantoolboxdir = '../box';
 my $iprotoxsso = eval {
@@ -24,6 +28,9 @@ my $iprotoxsso = eval {
 
 $iprotoxsso = File::Spec->rel2abs($iprotoxsso);
 
+my $inc = $math_int64 ? "-I$Config{vendorarch}/auto/Math/Int64/include" : '';
+my $mathint64a = $math_int64 ? "$Config{vendorarch}/auto/Math/Int64/libperl_math_int64.a" : '';
+
 WriteMakefile(
     NAME              => 'MR::Tarantool::Box::XS',
     VERSION_FROM      => 'lib/MR/Tarantool/Box/XS.pm', # finds $VERSION
@@ -33,10 +40,10 @@ WriteMakefile(
        AUTHOR         => 'a.mashanov <a.mashanov@localdomain>') : ()),
     LIBS              => ['-ltarantoolbox'], # e.g., '-lm'
     DEFINE            => $define, # e.g., '-DHAVE_SOMETHING'
-    INC               => "",
+    INC               => $inc,
 	# Un-comment this if you add C files to link with later:
     # OBJECT            => '$(O_FILES)', # link all the C files too
     CCFLAGS           => '-std=gnu99 -Wall -Werror',
     OPTIMIZE          => '-ggdb3',
-    LDFROM            => "\$(OBJECT) $iprotoxsso",
+    LDFROM            => "\$(OBJECT) $iprotoxsso $mathint64a",
 );
