@@ -235,12 +235,12 @@ tarantoolbox_tuple_t *tbxs_hv_to_tuple(HV *hv, AV *fields, SV *format, SV *errsv
         val = hv_fetch(hv, key, keylen, 0);
         if (!val)
             croak("\"%s\" is missed in tuple", key);
-        av_store(av, i, SvREFCNT_inc(*val));
+        (void)av_store(av, i, SvREFCNT_inc(*val));
     }
     if (extra_fields) {
         for (I32 j = 0; j <= av_len(extra_fields); j++, i++) {
             val = av_fetch(extra_fields, j, 0);
-            av_store(av, i, SvREFCNT_inc(*val));
+            (void)av_store(av, i, SvREFCNT_inc(*val));
         }
     }
     return tbxs_av_to_tuple(av, format, errsv);
@@ -273,7 +273,7 @@ AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv) {
         } else {
             sv = newSVpvn(data, size);
         }
-        av_store(tupleav, j, sv);
+        (void)av_store(tupleav, j, sv);
     }
     return tupleav;
 }
@@ -286,12 +286,12 @@ HV *tbxs_tuple_av_to_hv(AV *tupleav, AV *fields) {
         SV **name = av_fetch(fields, j, 0);
         if (!SvPOK(*name)) croak("field name should be a string");
         if ((val = av_fetch(tupleav, j, 0)))
-            hv_store_ent(tuplehv, *name, SvREFCNT_inc(*val), 0);
+            (void)hv_store_ent(tuplehv, *name, SvREFCNT_inc(*val), 0);
     }
     if (j <= av_len(tupleav)) {
         val = av_fetch(tupleav, j, 0);
         AV *extra = av_make(av_len(tupleav) - j + 1, val);
-        hv_store(tuplehv, "extra_fields", 12, newRV_noinc((SV *)extra), 0);
+        (void)hv_store(tuplehv, "extra_fields", 12, newRV_noinc((SV *)extra), 0);
     }
     sv_2mortal((SV *)tupleav);
     return tuplehv;
@@ -434,7 +434,7 @@ void tbxs_select_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *
     tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(message, &replica);
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
     if (replica)
-        hv_store(result, "replica", 7, &PL_sv_yes, 0);
+        (void)hv_store(result, "replica", 7, &PL_sv_yes, 0);
 
     SV *format = NULL;
     AV *fields = NULL;
@@ -492,12 +492,14 @@ void tbxs_select_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *
             IV id = SvIV(hash_by);
             val = av_fetch(tupleav, id, 0);
             if (!val) croak("tuple is too short to contain \"hash_by\" keys");
-            hv_store_ent((HV *)tuplessv, *val, newRV_noinc(tuplesv), 0);
+            (void)hv_store_ent((HV *)tuplessv, *val, newRV_noinc(tuplesv), 0);
         } else {
-            av_store((AV *)tuplessv, i, newRV_noinc(tuplesv));
+            (void)av_store((AV *)tuplessv, i, newRV_noinc(tuplesv));
         }
     }
-    hv_store(result, "tuples", 6, newRV_noinc(tuplessv), 0);
+    SV *tuplesrv = newRV_noinc(tuplessv);
+    if (!hv_store(result, "tuples", 6, tuplesrv, 0))
+        SvREFCNT_dec(tuplesrv);
 }
 
 tarantoolbox_message_t *tbxs_insert_hv_to_message(HV *request, tbns_t *ns, SV *errsv) {
@@ -706,13 +708,16 @@ tarantoolbox_message_t *tbxs_delete_hv_to_message(HV *request, tbns_t *ns, SV *e
 void tbxs_affected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *request, tbns_t *ns) {
     tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(message, NULL);
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
+    SV *tuplesv;
     if (tarantoolbox_tuples_has_tuples(tuples) && ntuples == 1) {
         AV *tupleav = tbxs_tuple_to_av(tarantoolbox_tuples_get_tuple(tuples, 0), ns->format);
-        SV *tuplesv = ns->fields && !tbxs_fetch_raw(request) ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->fields) : (SV *)tupleav;
-        hv_store(result, "tuple", 5, newRV_noinc(tuplesv), 0);
+        SV *tupleahv = ns->fields && !tbxs_fetch_raw(request) ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->fields) : (SV *)tupleav;
+        tuplesv = newRV_noinc(tupleahv);
     } else {
-        hv_store(result, "tuple", 5, newSVuv(ntuples), 0);
+        tuplesv = newSVuv(ntuples);
     }
+    if (!hv_store(result, "tuple", 5, tuplesv, 0))
+        SvREFCNT_dec(tuplesv);
 }
 
 tarantoolbox_message_t *tbxs_hv_to_message(HV *request, tbns_t *ns, SV *errsv) {
@@ -763,7 +768,8 @@ HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, tbns_t *ns,
         sv_setuv(errsv, ERR_CODE_INVALID_REQUEST);
         SvPOK_on(errsv);
     }
-    hv_store(result, "error", 5, errsv, 0);
+    if (!hv_store(result, "error", 5, errsv, 0))
+        SvREFCNT_dec(errsv);
     return result;
 }
 
@@ -830,7 +836,7 @@ void tbns_set_indexes(tbns_t *ns, AV *indexes) {
         for (I32 j = 0; j <= av_len(keys); j++) {
             val = av_fetch(keys, j, 0);
             if (SvIOK(*val)) {
-                av_store(idkeys, j, SvREFCNT_inc(*val));
+                (void)av_store(idkeys, j, SvREFCNT_inc(*val));
             } else if (SvPOK(*val)) {
                 if (ns->field_id_by_name == NULL)
                     croak("\"fields\" are required if you use names instead of ids in \"indexes\"");
@@ -839,14 +845,14 @@ void tbns_set_indexes(tbns_t *ns, AV *indexes) {
                 val = hv_fetch(ns->field_id_by_name, name, namelen, 0);
                 if (!val)
                     croak("no \"%s\" in \"fields\"", name);
-                av_store(idkeys, j, SvREFCNT_inc(*val));
+                (void)av_store(idkeys, j, SvREFCNT_inc(*val));
             } else {
                 croak("each key should be a string or an integer");
             }
         }
 
-        av_store(ns->indexes, i, newRV_noinc((SV *)idkeys));
-        hv_store(ns->index_id_by_name, name, namelen, newSVuv(i), 0);
+        (void)av_store(ns->indexes, i, newRV_noinc((SV *)idkeys));
+        (void)hv_store(ns->index_id_by_name, name, namelen, newSVuv(i), 0);
 
         if ((val = hv_fetch(index, "default", 7, 0))) {
             if (SvTRUE(*val)) {
@@ -876,7 +882,7 @@ void tbns_set_indexes(tbns_t *ns, AV *indexes) {
             }
             SvCUR_set(index_format, av_len(idkeys) + 1);
             *SvEND(index_format) = '\0';
-            av_store(ns->index_format, i, index_format);
+            (void)av_store(ns->index_format, i, index_format);
         }
 
         if (ns->fields) {
@@ -885,9 +891,9 @@ void tbns_set_indexes(tbns_t *ns, AV *indexes) {
             for (I32 j = 0; j <= av_len(idkeys); j++) {
                 SV **val = av_fetch(ns->fields, j, 0);
                 if (!val) croak("field in index %"IVdf" has no name", i);
-                av_store(fields, j, SvREFCNT_inc(*val));
+                (void)av_store(fields, j, SvREFCNT_inc(*val));
             }
-            av_store(ns->index_fields, i, newRV_noinc((SV *)fields));
+            (void)av_store(ns->index_fields, i, newRV_noinc((SV *)fields));
         }
     }
 }
@@ -963,7 +969,7 @@ ns_new(klass, ...)
                     char *name = SvPV(*val, namelen);
                     if (hv_exists(ns->field_id_by_name, name, namelen))
                         croak("field's name should be unique");
-                    hv_store(ns->field_id_by_name, name, namelen, newSViv(j), 0);
+                    (void)hv_store(ns->field_id_by_name, name, namelen, newSViv(j), 0);
                 }
             } else if (strcmp(key, "indexes") == 0) {
                 if (!(SvROK(value) && SvTYPE(SvRV(value)) == SVt_PVAV))
@@ -983,7 +989,7 @@ ns_new(klass, ...)
             dMY_CXT;
             if (hv_exists_ent(MY_CXT.namespaces, klass, 0))
                 croak("singleton %s already initialized", SvPV_nolen(klass));
-            hv_store_ent(MY_CXT.namespaces, klass, SvREFCNT_inc(RETVAL), 0);
+            (void)hv_store_ent(MY_CXT.namespaces, klass, SvREFCNT_inc(RETVAL), 0);
         }
     OUTPUT:
         RETVAL
