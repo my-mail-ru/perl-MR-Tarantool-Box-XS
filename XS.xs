@@ -302,8 +302,6 @@ tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *err
     if (!val) croak("invalid index %u", index);
     SV *format = *val;
     if (SvPOK(sv) || SvIOK(sv)) {
-        if (SvCUR(format) != 1)
-            croak("\"key\" should be an ARRAYREF of size %d", SvCUR(format));
         size_t size;
         void *data = tbxs_sv_to_field(SvPVX(format)[0], sv, &size, errsv);
         if (data == NULL) return NULL;
@@ -312,8 +310,8 @@ tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *err
         return tuple;
     } else if (SvROK(sv) && SvTYPE(SvRV(sv)) == SVt_PVAV) {
         AV *av = (AV *)SvRV(sv);
-        if (av_len(av) + 1 != SvCUR(format))
-            croak("\"key\" should be an ARRAYREF of size %d", SvCUR(format));
+        if (av_len(av) + 1 > SvCUR(format))
+            croak("\"key\" should be an ARRAYREF of size %d or less", SvCUR(format));
         return tbxs_av_to_tuple(av, format, errsv);
     } else if (SvROK(sv) && SvTYPE(SvRV(sv)) == SVt_PVHV) {
         HV *hv = (HV *)SvRV(sv);
@@ -401,9 +399,12 @@ tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, tbns_t *ns, SV *e
 
     uint32_t limit = 0;
     if ((val = hv_fetch(request, "limit", 5, 0))) {
-        if (!(SvIOK(*val) || looks_like_number(*val)))
+        if (!SvOK(*val))
+            limit = UINT32_MAX;
+        else if (SvIOK(*val) || looks_like_number(*val))
+            limit = SvUV(*val);
+        else
             croak("\"limit\" should be an integer");
-        limit = SvUV(*val);
     }
 
     val = hv_fetch(request, "keys", 4, 0);

@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 75;
+use Test::More tests => 80;
 use Test::LeakTrace;
 use Getopt::Long;
 use MR::IProto::XS;
@@ -25,7 +25,7 @@ my $ns = MR::Tarantool::Box::XS->new(
     namespace => 22,
     format    => 'lLLll &&&&& L&l & LL&lLlLLl&L&',
     fields    => [qw/ ID Bi1 Bi2 F3 F4 F5 F6 F7 F8 SubStr F10 F11 F12 F13 Bits F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 /],
-    indexes   => [ { name => 'id', keys => ['ID'] } ],
+    indexes   => [ { name => 'id', keys => ['ID'] }, { name => 'bi', keys => ['Bi1', 'Bi2'] } ],
 );
 isa_ok($ns, 'MR::Tarantool::Box::XS');
 
@@ -96,17 +96,36 @@ sub check_select {
     is($resp->[0]->{tuples}->[0]->{ID}, 1000011658, "select by key in array");
     is($resp->[0]->{tuples}->[1]->{ID}, 1000011659, "select by key in hash");
 
+    $resp = $ns->do({
+        type      => 'select',
+        use_index => 'bi',
+        keys      => [ [ 1, 2 ] ],
+        limit     => 5,
+    });
+    is(scalar @{$resp->{tuples}}, 5, "select by multipart key - limit");
+    is($resp->{tuples}->[0]->{Bi1}, 1, "select by multipart key 1");
+    is($resp->{tuples}->[0]->{Bi2}, 2, "select by multipart key 2");
+
+    $resp = $ns->do({
+        type      => 'select',
+        use_index => 'bi',
+        keys      => [ [ 2 ] ],
+        limit     => 15,
+    });
+    is(scalar @{$resp->{tuples}}, 15, "select by part of multipart key - limit");
+    is(grep({ $_->{Bi1} == 2 } @{$resp->{tuples}}), scalar @{$resp->{tuples}}, "select by part of multipart key 1");
+
     check_replica_flag();
     return;
 }
 
 sub check_replica_flag {
-    my $iproto = MR::IProto::XS->new(masters => ['10.0.0.1:9999'], replicas => ['188.93.61.206:13013']);
+    my $iproto = MR::IProto::XS->new(masters => ['10.0.0.1:9999'], replicas => [$ENV{DISPATCH_SERVER}]);
     my $box = MR::Tarantool::Box::XS->new(
         iproto    => $iproto,
         namespace => 0,
-        format    => 'l& SSLL',
-        fields    => [qw/ID Email ShardNum HistoryShardNum Base Flags/],
+        format    => 'l& &S&L',
+        fields    => [qw/ID Email D2 D3 D4 D5/],
         indexes   => [
             { name => 'primary_id', keys => ['ID'], default => 1 },
             { name => 'primary_email', keys => ['Email'] },
