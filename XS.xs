@@ -37,6 +37,12 @@ typedef struct {
 typedef SV * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 
+#ifdef WITH_MATH_INT64
+#define SvFieldOK(sv) (SvPOK(sv) || SvIOK(sv) || SvI64OK(sv) || SvU64OK(sv))
+#else
+#define SvFieldOK(sv) (SvPOK(sv) || SvIOK(sv))
+#endif
+
 #ifdef WITH_RANGE_CHECK
 #define tbxs_check_value(type, condition, data, errsv, pf, pv) \
     do { \
@@ -301,7 +307,7 @@ tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *err
     SV **val = av_fetch(ns->index_format, index, 0);
     if (!val) croak("invalid index %u", index);
     SV *format = *val;
-    if (SvPOK(sv) || SvIOK(sv)) {
+    if (SvFieldOK(sv)) {
         size_t size;
         void *data = tbxs_sv_to_field(SvPVX(format)[0], sv, &size, errsv);
         if (data == NULL) return NULL;
@@ -414,7 +420,7 @@ tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, tbns_t *ns, SV *e
     if (av_len(keysav) == -1) croak("\"keys\" should be non-empty");
     val = av_fetch(keysav, 0, 0);
     int nfields;
-    if (SvIOK(*val) || SvPOK(*val)) {
+    if (SvFieldOK(*val)) {
         nfields = 1;
     } else if (SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV) {
         nfields = av_len((AV *)SvRV(*val)) + 1;
