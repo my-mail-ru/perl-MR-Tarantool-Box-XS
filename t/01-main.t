@@ -1,7 +1,8 @@
 use strict;
 use warnings;
-use Test::More tests => 80;
+use Test::More tests => 98;
 use Test::LeakTrace;
+use Perl::Destruct::Level level => 2;
 use Getopt::Long;
 use MR::IProto::XS;
 BEGIN { use_ok('MR::Tarantool::Box::XS') };
@@ -41,15 +42,33 @@ my $dispatch = MR::Tarantool::Box::XS->new(
     ],
 );
 
+my $lua_iproto = MR::IProto::XS->new(masters => ['5.61.233.77:33300']);
+my $echo = MR::Tarantool::Box::XS::Function->new(
+    iproto     => $lua_iproto,
+    name       => 'client_autotest.echo',
+    in_format  => 'L$C',
+    in_fields  => [ 'one', 'two', 'three' ],
+    out_format => 'L$C',
+    out_fields => [ 'one', 'two', 'three' ],
+);
+isa_ok($echo, 'MR::Tarantool::Box::XS::Function');
+
 {
     package Test::JUData;
     use base 'MR::Tarantool::Box::XS';
+}
+
+{
+    package Test::Function;
+    use base 'MR::Tarantool::Box::XS::Function';
 }
 
 check_select();
 check_insert();
 check_update();
 check_delete();
+check_call();
+check_multicluster();
 check_pack();
 check_singleton();
 check_info();
@@ -360,6 +379,86 @@ sub check_delete {
     return;
 }
 
+sub check_call {
+    my $function = $echo;
+    my %tuple = ( one => 1, two => 'two', three => 3 );
+    my @tuple = ( 1, 'two', 3 );
+    my $resp = $function->bulk([
+        {
+            type  => 'call',
+            tuple => \%tuple,
+        },
+        {
+            type  => 'call',
+            tuple => \@tuple,
+        },
+        {
+            type  => 'call',
+            tuple => \@tuple,
+            raw   => 1,
+        },
+    ]);
+    is_deeply($resp->[0]->{tuples}, [ \%tuple ], "call function with named parameters and named result");
+    is_deeply($resp->[1]->{tuples}, [ \%tuple ], "call function with positional parameters and named result");
+    is_deeply($resp->[2]->{tuples}, [ \@tuple ], "call function with positional parameters and positional result");
+
+    $function = MR::Tarantool::Box::XS::Function->new(
+        iproto     => $lua_iproto,
+        name       => 'client_autotest.complex',
+        in_format  => 'CSLQ$',
+        in_fields  => [qw/ uint8 uint16 uint32 uint64 string /],
+        out_format => [ '$$L', 'S$', '$L', '$L' ],
+        out_fields => [ [ '1st', '2nd', '3rd' ], [ 'num', 'str' ], undef, [ 'key', 'val' ] ],
+    );
+    $resp = $function->do({
+        type  => 'call',
+        tuple => [ 8, 16, 32, 64, 'string' ],
+    });
+    cmp_ok($resp->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_OK, "call function: pack parameters");
+    my @tuples = ( { '1st' => 'one', '2nd' => 'two', '3rd' => 10 }, { 'str' => 'two', 'num' => 16 }, [ 'three', 3 ], { 'val' => 4, 'key' => 'four' }, { 'val' => 5, 'key' => 'five' }, { 'val' => 6, 'key' => 'six' } );
+    is_deeply($resp->{tuples}, \@tuples, "call function: unpack parameters");
+    return;
+}
+
+sub check_multicluster {
+    my $resp = MR::Tarantool::Box::XS->do({
+        namespace => $dispatch,
+        type      => 'select',
+        keys      => [1000011658, 1000011659],
+    });
+    is($resp->{tuples}->[0]->{ID}, 1000011658, "namespace's do as a class method");
+
+    my %tuple = ( one => 1, two => 'two', three => 3 );
+    $resp = MR::Tarantool::Box::XS->do({
+        function => $echo,
+        type     => 'call',
+        tuple    => \%tuple,
+    });
+    is_deeply($resp->{tuples}, [ \%tuple ], "function's do as a class method");
+
+    $resp = MR::Tarantool::Box::XS->bulk([
+        {
+            namespace => $ns,
+            type      => 'select',
+            keys      => [1000011658, 1000011659],
+        },
+        {
+            namespace => $dispatch,
+            type      => 'select',
+            keys      => [1000011658, 1000011659],
+        },
+        {
+            function => $echo,
+            type     => 'call',
+            tuple    => \%tuple,
+        }
+    ]);
+    ok($resp->[0]->{tuples}->[0]->{ID} == 1000011658 && $resp->[1]->{tuples}->[0]->{ID} == 1000011658
+        && exists $resp->[0]->{tuples}->[0]->{F11} && exists $resp->[1]->{tuples}->[0]->{D2}, "select from more then one cluster");
+    is_deeply($resp->[2]->{tuples}, [ \%tuple ], "call from more than one cluster");
+    return;
+}
+
 sub check_pack {
     my $set = sub {
         my ($field, $value) = @_;
@@ -478,7 +577,7 @@ sub check_singleton {
             fields    => [qw/ ID /],
             indexes   => [ { name => 'id', keys => ['ID'] } ],
         );
-        isa_ok($singleton, "Test::JUData");
+        isa_ok($singleton, "Test::JUData", "create_singleton()");
     }
     my $resp = Test::JUData->bulk([{
         type => 'select',
@@ -486,13 +585,43 @@ sub check_singleton {
     }]);
     is($resp->[0]->{tuples}->[0]->{ID}, 1000011658, "access to namespace by singleton");
     {
+        my $singleton = Test::JUData->instance();
+        isa_ok($singleton, "Test::JUData", "instance()");
+    }
+    {
         my $singleton = Test::JUData->remove_singleton();
-        isa_ok($singleton, "Test::JUData");
+        isa_ok($singleton, "Test::JUData", "remove_singleton()");
+    }
+    {
+        my $singleton = Test::Function->create_singleton(
+            iproto     => $lua_iproto,
+            name       => 'client_autotest.echo',
+            in_format  => 'L$C',
+            in_fields  => [ 'one', 'two', 'three' ],
+            out_format => 'L$C',
+            out_fields => [ 'one', 'two', 'three' ],
+        );
+        isa_ok($singleton, "Test::Function", "create_singleton()");
+    }
+    my %tuple = ( one => 1, two => 'two', three => 3 );
+    $resp = Test::Function->do({
+        type  => 'call',
+        tuple => \%tuple,
+    });
+    is_deeply($resp->{tuples}, [ \%tuple ], "call function by singleton");
+    {
+        my $singleton = Test::Function->instance();
+        isa_ok($singleton, "Test::Function", "instance()");
+    }
+    {
+        my $singleton = Test::Function->remove_singleton();
+        isa_ok($singleton, "Test::Function", "remove_singleton()");
     }
 }
 
 sub check_info {
-    is($dispatch->iproto(), $dispatch_iproto, "iproto()");
+    is($dispatch->iproto(), $dispatch_iproto, "namespace's iproto()");
+    is($echo->iproto(), $lua_iproto, "function's iproto()");
     return;
 }
 
@@ -502,11 +631,14 @@ sub check_leak {
     local *main::ok = sub {};
     local *main::cmp_ok = sub {};
     local *main::isa_ok = sub {};
+    local *main::is_deeply = sub {};
     local *main::skip = sub { no warnings 'exiting'; last SKIP };
     no_leaks_ok { check_select() } "select not leaks";
     no_leaks_ok { check_insert() } "insert not leaks";
     no_leaks_ok { check_update() } "update not leaks";
     no_leaks_ok { check_delete() } "delete not leaks";
+    no_leaks_ok { check_multicluster() } "multicluster not leaks";
+    no_leaks_ok { check_call() } "call not leaks";
     no_leaks_ok { check_pack() } "various pack/unpack not leaks";
     no_leaks_ok { check_singleton() } "singleton not leaks";
     no_leaks_ok { check_info() } "info not leaks";
