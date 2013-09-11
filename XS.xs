@@ -51,11 +51,6 @@ typedef SV * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 typedef SV * MR__Tarantool__Box__XS__Function;
 
-#define tbxs_object_to_ns(namespace) \
-    (namespace ? INT2PTR(tbns_t *, SvIV((SV*)SvRV(namespace))) : NULL)
-#define tbxs_object_to_func(function) \
-    (function ? INT2PTR(tbfunc_t *, SvIV((SV*)SvRV(function))) : NULL)
-
 #ifdef WITH_MATH_INT64
 #define SvFieldOK(sv) (SvPOK(sv) || SvIOK(sv) || SvI64OK(sv) || SvU64OK(sv))
 #else
@@ -363,20 +358,58 @@ tarantoolbox_tuples_t *tbxs_av_to_keys(uint32_t index, AV *av, tbns_t *ns, SV *e
     return tuples;
 }
 
+static SV *tbns_instance(SV *sv) {
+    if (!sv_derived_from(sv, "MR::Tarantool::Box::XS")) {
+        croak("\"%s\" is not of type MR::Tarantool::Box::XS", SvPV_nolen(sv));
+    } else if (SvPOK(sv)) {
+        dMY_CXT;
+        HE *he = hv_fetch_ent(MY_CXT.namespaces, sv, 0, 0);
+        return he ? HeVAL(he) : NULL;
+    } else {
+        return sv;
+    }
+}
+
+static SV *tbfunc_instance(SV *sv) {
+    if (!sv_derived_from(sv, "MR::Tarantool::Box::XS::Function")) {
+        croak("\"%s\" is not of type MR::Tarantool::Box::XS::Function", SvPV_nolen(sv));
+    } else if (SvPOK(sv)) {
+        dMY_CXT;
+        HE *he = hv_fetch_ent(MY_CXT.functions, sv, 0, 0);
+        return he ? HeVAL(he) : NULL;
+    } else {
+        return sv;
+    }
+}
+
+static tbns_t *tbxs_extract_ns(SV *sv) {
+    if (!sv)
+        return NULL;
+    SV *instance = tbns_instance(sv);
+    return instance ? INT2PTR(tbns_t *, SvIV((SV*)SvRV(instance))) : NULL;
+}
+
+static tbfunc_t *tbxs_extract_func(SV *sv) {
+    if (!sv)
+        return NULL;
+    SV *instance = tbfunc_instance(sv);
+    return instance ? INT2PTR(tbfunc_t *, SvIV((SV*)SvRV(instance))) : NULL;
+}
+
 static tbns_t *tbxs_fetch_ns(HV *request) {
     SV **sv = hv_fetch(request, "namespace", 9, 0);
     if (!sv) croak("\"namespace\" should be specified");
-    if (!sv_derived_from(*sv, "MR::Tarantool::Box::XS"))
-        croak("\"namespace\" is not of type MR::Tarantool::Box::XS");
-    return tbxs_object_to_ns(*sv);
+    tbns_t *ns = tbxs_extract_ns(*sv);
+    if (!ns) croak("\"namespace\" should be an instance or a singleton of type MR::Tarantool::Box::XS");
+    return ns;
 }
 
 static tbfunc_t *tbxs_fetch_func(HV *request) {
     SV **sv = hv_fetch(request, "function", 8, 0);
     if (!sv) croak("\"function\" should be specified");
-    if (!sv_derived_from(*sv, "MR::Tarantool::Box::XS::Function"))
-        croak("\"function\" is not of type MR::Tarantool::Box::XS::Function");
-    return tbxs_object_to_func(*sv);
+    tbfunc_t *func = tbxs_extract_func(*sv);
+    if (!func) croak("\"function\" should be an instance or a singleton of type MR::Tarantool::Box::XS::Function");
+    return func;
 }
 
 tarantoolbox_tuple_t *tbxs_fetch_key(HV *request, tbns_t *ns, SV *errsv) {
@@ -414,7 +447,7 @@ static SV *tbxs_fetch_hash_by(HV *request, tbtupleconf_t *conf) {
 }
 
 static void tbxs_set_message_cluster(tarantoolbox_message_t *message, SV *clustersv) {
-    iproto_cluster_t *cluster = iprotoxs_object_to_cluster(clustersv);
+    iproto_cluster_t *cluster = iprotoxs_instance_to_cluster(clustersv);
     iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
     iproto_message_set_cluster(imessage, cluster);
 }
@@ -1132,9 +1165,10 @@ ns_new(klass, ...)
             char *key = SvPV_nolen(ST(i));
             SV *value = ST(i + 1);
             if (strcmp(key, "iproto") == 0) {
-                if (!sv_derived_from(value, "MR::IProto::XS"))
-                    croak("\"iproto\" is not of type MR::IProto::XS");
-                ns->cluster = SvREFCNT_inc(value);
+                SV *instance = iprotoxs_instance(value);
+                if (!instance)
+                    croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
+                ns->cluster = SvREFCNT_inc(instance);
             } else if (strcmp(key, "namespace") == 0) {
                 if (!(SvIOK(value) || looks_like_number(value)))
                     croak("\"namespace\" should be an integer");
@@ -1171,9 +1205,8 @@ void
 ns_DESTROY(namespace)
         MR::Tarantool::Box::XS namespace
     CODE:
-        if (!namespace)
-            croak("DESTROY should be called as an instance method");
-        tbns_t *ns = tbxs_object_to_ns(namespace);
+        tbns_t *ns = tbxs_extract_ns(namespace);
+        if (!ns) croak("DESTROY should be called as an instance method");
         SvREFCNT_dec(ns->cluster);
         SvREFCNT_dec(ns->tuple.fields);
         SvREFCNT_dec(ns->tuple.field_id_by_name);
@@ -1200,11 +1233,8 @@ MR::Tarantool::Box::XS
 ns_instance(klass)
         SV *klass
     CODE:
-        if (!SvPOK(klass))
-            croak("instance() should be called as a class method");
-        dMY_CXT;
-        HE *he = hv_fetch_ent(MY_CXT.namespaces, klass, 0, 0);
-        RETVAL = he ? SvREFCNT_inc(HeVAL(he)) : &PL_sv_undef;
+        SV *instance = tbns_instance(klass);
+        RETVAL = instance ? SvREFCNT_inc(instance) : &PL_sv_undef;
     OUTPUT:
         RETVAL
 
@@ -1249,9 +1279,9 @@ MR::IProto::XS
 ns_iproto(namespace)
         MR::Tarantool::Box::XS namespace
     CODE:
-        if (!namespace)
+        tbns_t *ns = tbxs_extract_ns(namespace);
+        if (!ns)
             croak("iproto() should be called as an instance or a singleton method");
-        tbns_t *ns = tbxs_object_to_ns(namespace);
         RETVAL = SvREFCNT_inc(ns->cluster);
     OUTPUT:
         RETVAL
@@ -1275,9 +1305,10 @@ fn_new(klass, ...)
             char *key = SvPV_nolen(ST(i));
             SV *value = ST(i + 1);
             if (strcmp(key, "iproto") == 0) {
-                if (!sv_derived_from(value, "MR::IProto::XS"))
-                    croak("\"iproto\" is not of type MR::IProto::XS");
-                func->cluster = SvREFCNT_inc(value);
+                SV *instance = iprotoxs_instance(value);
+                if (!instance)
+                    croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
+                func->cluster = SvREFCNT_inc(instance);
             } else if (strcmp(key, "name") == 0) {
                 if (!SvPOK(value))
                     croak("\"name\" should be a string");
@@ -1312,9 +1343,9 @@ void
 fn_DESTROY(function)
         MR::Tarantool::Box::XS::Function function
     CODE:
-        if (!function)
+        tbfunc_t *func = tbxs_extract_func(function);
+        if (!func)
             croak("DESTROY should be called as an instance method");
-        tbfunc_t *func = tbxs_object_to_func(function);
         SvREFCNT_dec(func->cluster);
         free(func->name);
         SvREFCNT_dec(func->in.fields);
@@ -1344,11 +1375,8 @@ MR::Tarantool::Box::XS::Function
 fn_instance(klass)
         SV *klass
     CODE:
-        if (!SvPOK(klass))
-            croak("instance() should be called as a class method");
-        dMY_CXT;
-        HE *he = hv_fetch_ent(MY_CXT.functions, klass, 0, 0);
-        RETVAL = he ? SvREFCNT_inc(HeVAL(he)) : &PL_sv_undef;
+        SV *instance = tbfunc_instance(klass);
+        RETVAL = instance ? SvREFCNT_inc(instance) : &PL_sv_undef;
     OUTPUT:
         RETVAL
 
@@ -1393,9 +1421,9 @@ MR::IProto::XS
 fn_iproto(function)
         MR::Tarantool::Box::XS::Function function
     CODE:
-        if (!function)
+        tbfunc_t *func = tbxs_extract_func(function);
+        if (!func)
             croak("iproto() should be called as an instance or a singleton method");
-        tbfunc_t *func = tbxs_object_to_func(function);
         RETVAL = SvREFCNT_inc(func->cluster);
     OUTPUT:
         RETVAL

@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 98;
+use Test::More tests => 104;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use Getopt::Long;
@@ -52,6 +52,11 @@ my $echo = MR::Tarantool::Box::XS::Function->new(
     out_fields => [ 'one', 'two', 'three' ],
 );
 isa_ok($echo, 'MR::Tarantool::Box::XS::Function');
+
+{
+    package Test::IProto;
+    use base 'MR::IProto::XS';
+}
 
 {
     package Test::JUData;
@@ -587,6 +592,8 @@ sub check_singleton {
     {
         my $singleton = Test::JUData->instance();
         isa_ok($singleton, "Test::JUData", "instance()");
+        cmp_ok($singleton->instance(), '==', $singleton, "instance() called on namespace's object");
+        cmp_ok(Test::JUData->iproto(), '==', $singleton->iproto(), "iproto() called on namespace's singleton");
     }
     {
         my $singleton = Test::JUData->remove_singleton();
@@ -612,11 +619,42 @@ sub check_singleton {
     {
         my $singleton = Test::Function->instance();
         isa_ok($singleton, "Test::Function", "instance()");
+        cmp_ok($singleton->instance(), '==', $singleton, "instance() called on function's object");
+        cmp_ok(Test::Function->iproto(), '==', $singleton->iproto(), "iproto() called on function's singleton");
     }
     {
         my $singleton = Test::Function->remove_singleton();
         isa_ok($singleton, "Test::Function", "remove_singleton()");
     }
+    {
+        Test::IProto->create_singleton(masters => ['188.93.61.208:30000']);
+        my $namespace = MR::Tarantool::Box::XS->new(
+            iproto    => 'Test::IProto',
+            namespace => 22,
+            format    => 'lLLll &&&&& LLl & LLLLLLLLLLLL',
+            fields    => [qw/ ID BirthdayMonth BirthdayDay Owner SubjectID Email Nick FirstName LastName MaidenName BirthdayYear Sex Region avatar_data MyAccess AccessJournal AccessUmask AccessAntiUmask AccessDefaultMask AccessCanChangeMask Flags Flags2 Flags3 Flags4 CreateTime MyCreateTime /],
+            indexes   => [ { name => 'id', keys => ['ID'] } ],
+        );
+        my $resp = $namespace->do({ type => 'select', keys => [1000011658] });
+        is($resp->{tuples}->[0]->{ID}, 1000011658, "access to namespace's cluster by singleton");
+        Test::IProto->remove_singleton();
+    }
+    {
+        Test::IProto->create_singleton(masters => ['5.61.233.77:33300']);
+        my $function = MR::Tarantool::Box::XS::Function->new(
+            iproto     => 'Test::IProto',
+            name       => 'client_autotest.echo',
+            in_format  => 'L$C',
+            in_fields  => [ 'one', 'two', 'three' ],
+            out_format => 'L$C',
+            out_fields => [ 'one', 'two', 'three' ],
+        );
+        my %tuple = ( one => 1, two => 'two', three => 3 );
+        my $resp = $function->do({ type  => 'call', tuple => \%tuple });
+        is_deeply($resp->{tuples}, [ \%tuple ], "access to function's cluster by singleton");
+        Test::IProto->remove_singleton();
+    }
+    return;
 }
 
 sub check_info {

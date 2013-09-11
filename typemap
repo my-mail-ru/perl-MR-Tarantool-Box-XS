@@ -1,38 +1,13 @@
 TYPEMAP
-MR::IProto::XS                   T_SV
-MR::Tarantool::Box::XS           T_PTROBJ_NS
-MR::Tarantool::Box::XS::Function T_PTROBJ_FUNC
+MR::IProto::XS                   T_PTROBJ_SIMPLE
+MR::Tarantool::Box::XS           T_PTROBJ_SIMPLE
+MR::Tarantool::Box::XS::Function T_PTROBJ_SIMPLE
 
 INPUT
-T_PTROBJ_NS
-    if (sv_derived_from($arg, \"${ntype}\")) {
-        if (SvPOK($arg)) {
-            dMY_CXT;
-            HE *he = hv_fetch_ent(MY_CXT.namespaces, $arg, 0, 0);
-            $var = he ? HeVAL(he) : NULL;
-        } else {
-            $var = $arg;
-        }
-    } else
-        Perl_croak(aTHX_ \"$var is not of type ${ntype}\")
+T_PTROBJ_SIMPLE
+    if (sv_derived_from($arg, \"${ntype}\")) $var = $arg;
+    else Perl_croak(aTHX_ \"$var is not of type ${ntype}\")
 
 OUTPUT
-T_PTROBJ_NS
-    $arg = $var;
-
-INPUT
-T_PTROBJ_FUNC
-    if (sv_derived_from($arg, \"${ntype}\")) {
-        if (SvPOK($arg)) {
-            dMY_CXT;
-            HE *he = hv_fetch_ent(MY_CXT.functions, $arg, 0, 0);
-            $var = he ? HeVAL(he) : NULL;
-        } else {
-            $var = $arg;
-        }
-    } else
-        Perl_croak(aTHX_ \"$var is not of type ${ntype}\")
-
-OUTPUT
-T_PTROBJ_FUNC
+T_PTROBJ_SIMPLE
     $arg = $var;
