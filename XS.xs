@@ -651,8 +651,8 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
         if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV))
             croak("each op should be an ARRAYREF");
         AV *opav = (AV *)SvRV(*val);
-        if (av_len(opav) != 2)
-            croak("each op should contain 3 elements: field_num, op and value");
+        if (av_len(opav) < 1)
+            croak("each op should contain at least 2 elements: field_num and op");
 
         uint32_t field_num;
         val = av_fetch(opav, 0, 0);
@@ -675,62 +675,72 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
             croak("op should be a string");
         char *opstr = SvPV_nolen(*val);
 
-        val = av_fetch(opav, 2, 0);
-        SV *value = *val;
-
+        SV *value;
         int32_t offset;
         int32_t length;
-        if (strcmp(opstr, "set") == 0) {
-            op = UPDATE_OP_SET;
-        } else if (strcmp(opstr, "add") == 0) {
-            op = UPDATE_OP_ADD;
-        } else if (strcmp(opstr, "and") == 0) {
-            op = UPDATE_OP_AND;
-        } else if (strcmp(opstr, "xor") == 0) {
-            op = UPDATE_OP_XOR;
-        } else if (strcmp(opstr, "or") == 0) {
-            op = UPDATE_OP_OR;
-        } else if (strcmp(opstr, "num_add") == 0) {
-            op = UPDATE_OP_ADD;
-        } else if (strcmp(opstr, "num_sub") == 0) {
-            op = UPDATE_OP_ADD;
-            value = sv_2mortal(newSViv(-SvIV(value)));
-        } else if (strcmp(opstr, "bit_set") == 0) {
-            op = UPDATE_OP_OR;
-        } else if (strcmp(opstr, "bit_clear") == 0) {
-            op = UPDATE_OP_AND;
-            value = sv_2mortal(newSVuv(~SvUV(value)));
-        } else if (strcmp(opstr, "splice") == 0 || strcmp(opstr, "substr") == 0) {
-            op = UPDATE_OP_SPLICE;
-            if (!(SvROK(value) && SvTYPE(SvRV(value)) == SVt_PVAV))
-                croak("value for op %s should be an ARRAYREF of <int[, int[, string]]>", opstr);
-            AV *sp = (AV *)SvRV(value);
-            val = av_fetch(sp, 0, 0);
-            offset = val && SvOK(*val) ? SvIV(*val) : 0;
-            val = av_fetch(sp, 1, 0);
-            length = val && SvOK(*val) ? SvIV(*val) : INT32_MAX;
-            val = av_fetch(sp, 2, 0);
-            value = val ? *val : NULL;
-        } else if (strcmp(opstr, "append") == 0) {
-            op = UPDATE_OP_SPLICE;
-            offset = INT32_MAX;
-            length = 0;
-        } else if (strcmp(opstr, "prepend") == 0) {
-            op = UPDATE_OP_SPLICE;
-            offset = 0;
-            length = 0;
-        } else if (strcmp(opstr, "cutbeg") == 0) {
-            op = UPDATE_OP_SPLICE;
-            offset = 0;
-            length = SvIV(value);
-            value = NULL;
-        } else if (strcmp(opstr, "cutend") == 0) {
-            op = UPDATE_OP_SPLICE;
-            offset = -SvIV(value);
-            length = SvIV(value);
-            value = NULL;
+        if (strcmp(opstr, "delete") == 0) {
+            if (!(av_len(opav) == 1 || (av_len(opav) == 2 && !SvOK(*av_fetch(opav, 2, 0)))))
+                croak("each delete op should contain 2 elements: field_num and op");
+            op = UPDATE_OP_DELETE;
         } else {
-            croak("unknown op \"%s\"", opstr);
+            if (av_len(opav) != 2)
+                croak("each op should contain 3 elements: field_num, op and value");
+            value = *av_fetch(opav, 2, 0);
+
+            if (strcmp(opstr, "set") == 0) {
+                op = UPDATE_OP_SET;
+            } else if (strcmp(opstr, "add") == 0) {
+                op = UPDATE_OP_ADD;
+            } else if (strcmp(opstr, "and") == 0) {
+                op = UPDATE_OP_AND;
+            } else if (strcmp(opstr, "xor") == 0) {
+                op = UPDATE_OP_XOR;
+            } else if (strcmp(opstr, "or") == 0) {
+                op = UPDATE_OP_OR;
+            } else if (strcmp(opstr, "num_add") == 0) {
+                op = UPDATE_OP_ADD;
+            } else if (strcmp(opstr, "num_sub") == 0) {
+                op = UPDATE_OP_ADD;
+                value = sv_2mortal(newSViv(-SvIV(value)));
+            } else if (strcmp(opstr, "bit_set") == 0) {
+                op = UPDATE_OP_OR;
+            } else if (strcmp(opstr, "bit_clear") == 0) {
+                op = UPDATE_OP_AND;
+                value = sv_2mortal(newSVuv(~SvUV(value)));
+            } else if (strcmp(opstr, "insert") == 0) {
+                op = UPDATE_OP_INSERT;
+            } else if (strcmp(opstr, "splice") == 0 || strcmp(opstr, "substr") == 0) {
+                op = UPDATE_OP_SPLICE;
+                if (!(SvROK(value) && SvTYPE(SvRV(value)) == SVt_PVAV))
+                    croak("value for op %s should be an ARRAYREF of <int[, int[, string]]>", opstr);
+                AV *sp = (AV *)SvRV(value);
+                val = av_fetch(sp, 0, 0);
+                offset = val && SvOK(*val) ? SvIV(*val) : 0;
+                val = av_fetch(sp, 1, 0);
+                length = val && SvOK(*val) ? SvIV(*val) : INT32_MAX;
+                val = av_fetch(sp, 2, 0);
+                value = val ? *val : NULL;
+            } else if (strcmp(opstr, "append") == 0) {
+                op = UPDATE_OP_SPLICE;
+                offset = INT32_MAX;
+                length = 0;
+            } else if (strcmp(opstr, "prepend") == 0) {
+                op = UPDATE_OP_SPLICE;
+                offset = 0;
+                length = 0;
+            } else if (strcmp(opstr, "cutbeg") == 0) {
+                op = UPDATE_OP_SPLICE;
+                offset = 0;
+                length = SvIV(value);
+                value = NULL;
+            } else if (strcmp(opstr, "cutend") == 0) {
+                op = UPDATE_OP_SPLICE;
+                offset = -SvIV(value);
+                length = SvIV(value);
+                value = NULL;
+            } else {
+                croak("unknown op \"%s\"", opstr);
+            }
         }
 
         size_t size;
@@ -755,6 +765,10 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
                     data = NULL;
                     size = 0;
                 }
+                break;
+            case UPDATE_OP_DELETE:
+                data = NULL;
+                size = 0;
                 break;
             default: {
                 STRLEN formatlen;

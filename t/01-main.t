@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 110;
+use Test::More tests => 112;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use Getopt::Long;
@@ -377,6 +377,22 @@ sub check_update {
     });
     is($resp->{tuple}->{SubStr}, "ABCXXXXXGHI", "update substr");
 
+    $resp = $ns->do({
+        type => 'update',
+        key  => $TEST_ID,
+        ops  => [ [ 26 => insert => "Trololo" ] ],
+        want_result => 1,
+    });
+    is($resp->{tuple}->{extra_fields}->[0], "Trololo", "update insert");
+
+    $resp = $ns->do({
+        type => 'update',
+        key  => $TEST_ID,
+        ops  => [ [ 26 => 'delete' ] ],
+        want_result => 1,
+    });
+    is($resp->{tuple}->{extra_fields}, undef, "update delete");
+
     return;
 }
 
@@ -570,7 +586,7 @@ sub check_pack {
     is($resp->[1]->{tuple}->{Utf8String}, "Строка в utf8", "pack non-utf8 string as utf8 - ok");
 
     SKIP: {
-        skip "check cp1251 <=> utf8", 12 unless $cp1251;
+        skip "check cp1251 <=> utf8", 6 unless $cp1251;
 
         my $ns = MR::Tarantool::Box::XS->new(
             iproto    => $shard_iproto,
