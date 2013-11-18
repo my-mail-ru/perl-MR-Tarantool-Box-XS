@@ -8,15 +8,18 @@ use Config;
 
 my $range_check;
 my $math_int64;
+my $cp1251;
 
 GetOptions(
     'range-check!' => \$range_check,
     'math-int64!'  => \$math_int64,
+    'cp1251!'      => \$cp1251,
 );
 
 my $define = join ' ',
     $range_check ? '-DWITH_RANGE_CHECK' : (),
-    $math_int64 ? '-DWITH_MATH_INT64' : ();
+    $math_int64 ? '-DWITH_MATH_INT64' : (),
+    $cp1251 ? '-DWITH_CP1251' : ();
 
 my $tarantoolboxdir = '../box';
 my $iprotoxsso = eval {

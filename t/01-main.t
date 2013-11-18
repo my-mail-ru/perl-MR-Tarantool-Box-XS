@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 104;
+use Test::More tests => 110;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use Getopt::Long;
@@ -11,7 +11,12 @@ use utf8;
 
 my $range_check;
 my $math_int64;
-GetOptions('range-check!' => \$range_check, 'math-int64!' => \$math_int64);
+my $cp1251;
+GetOptions(
+    'range-check!' => \$range_check,
+    'math-int64!'  => \$math_int64,
+    'cp1251!'      => \$cp1251,
+);
 
 my $TEST_ID = 1999999999;
 my $TEST2_ID = 1999999998;
@@ -563,6 +568,44 @@ sub check_pack {
     $resp = $ns->bulk([ $set->(String => $cp1251_with_flag), $set->(Utf8String => $utf8_without_flag) ]);
     is($resp->[0]->{tuple}->{String}, Encode::encode('cp1251', "Строка в cp1251"), "pack utf8 string as non-utf8 - ok");
     is($resp->[1]->{tuple}->{Utf8String}, "Строка в utf8", "pack non-utf8 string as utf8 - ok");
+
+    SKIP: {
+        skip "check cp1251 <=> utf8", 12 unless $cp1251;
+
+        my $ns = MR::Tarantool::Box::XS->new(
+            iproto    => $shard_iproto,
+            namespace => 23,
+            format    => 'l &',
+            fields    => [qw/ ID Str /],
+            indexes   => [ { name => 'id', keys => ['ID'] } ],
+        );
+        my $cp1251_ns = MR::Tarantool::Box::XS->new(
+            iproto    => $shard_iproto,
+            namespace => 23,
+            format    => 'l <',
+            fields    => [qw/ ID Str /],
+            indexes   => [ { name => 'id', keys => ['ID'] } ],
+        );
+        my $utf8_ns = MR::Tarantool::Box::XS->new(
+            iproto    => $shard_iproto,
+            namespace => 23,
+            format    => 'l >',
+            fields    => [qw/ ID Str /],
+            indexes   => [ { name => 'id', keys => ['ID'] } ],
+        );
+
+        my $resp = $cp1251_ns->do({ type => 'insert', tuple => [ $TEST3_ID, "Строка" ], want_result => 1 });
+        ok(utf8::is_utf8($resp->{tuple}->{Str}), "string returned from cp1251 field has utf8 flag");
+        is($resp->{tuple}->{Str}, "Строка", "string returned from cp1251 field is in utf8");
+        $resp = $ns->do({ type => 'select', keys => [ $TEST3_ID ] });
+        is($resp->{tuples}->[0]->{Str}, Encode::encode('cp1251', "Строка"), "string in cp1251 field is realy in cp1251");
+
+        my $resp = $utf8_ns->do({ type => 'insert', tuple => [ $TEST3_ID, Encode::encode('cp1251', "Строка") ], want_result => 1 });
+        ok(!utf8::is_utf8($resp->{tuple}->{Str}), "string returned from utf8 field has no utf8 flag");
+        is($resp->{tuple}->{Str}, Encode::encode('cp1251', "Строка"), "string returned from utf8 field is in cp1251");
+        $resp = $ns->do({ type => 'select', keys => [ $TEST3_ID ] });
+        is($resp->{tuples}->[0]->{Str}, Encode::encode('utf8', "Строка"), "string in utf8 field is realy in utf8");
+    }
 
     $resp = $ns->bulk([{
         type => 'delete',

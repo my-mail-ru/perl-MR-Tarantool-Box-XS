@@ -18,6 +18,9 @@
 typedef struct {
     HV *namespaces;
     HV *functions;
+#ifdef WITH_CP1251
+    SV *cp1251;
+#endif
 } my_cxt_t;
 
 START_MY_CXT;
@@ -72,6 +75,67 @@ typedef SV * MR__Tarantool__Box__XS__Function;
             warn("value %"pf" is out of range for "#type, pv); \
         } \
     } while (0)
+#endif
+
+#ifdef WITH_CP1251
+static SV *tbxs_find_cp1251(void) {
+    require_pv("Encode.pm");
+    dSP;
+    dTARGET;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(sp);
+    XPUSHp("cp1251", 6);
+    PUTBACK;
+    call_pv("Encode::find_encoding", G_SCALAR);
+    SPAGAIN;
+    SV *cp1251 = POPs;
+    if (!SvOK(cp1251))
+        croak("encoding cp1251 not found");
+    SvREFCNT_inc(cp1251);
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+    return cp1251;
+}
+
+static SV *tbxs_decode_cp1251(SV *sv) {
+    dMY_CXT;
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(sp);
+    XPUSHs(MY_CXT.cp1251);
+    XPUSHs(sv);
+    PUTBACK;
+    call_method("decode", G_SCALAR);
+    SPAGAIN;
+    SV *res = POPs;
+    SvREFCNT_inc(res);
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+    return res;
+}
+
+static SV *tbxs_encode_cp1251(SV *sv) {
+    dMY_CXT;
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(sp);
+    XPUSHs(MY_CXT.cp1251);
+    XPUSHs(sv);
+    PUTBACK;
+    call_method("encode", G_SCALAR);
+    SPAGAIN;
+    SV *res = POPs;
+    SvREFCNT_inc(res);
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+    return res;
+}
 #endif
 
 void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
@@ -152,6 +216,20 @@ void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
         case '$':
             data = SvPV(value, *size);
             break;
+#ifdef WITH_CP1251
+        case '<': {
+            SV *cp1251_value = tbxs_encode_cp1251(value);
+            data = SvPV(cp1251_value, *size);
+            sv_2mortal(cp1251_value);
+            break;
+        }
+        case '>': {
+            SV *utf8_value = tbxs_decode_cp1251(value);
+            data = SvPV(utf8_value, *size);
+            sv_2mortal(utf8_value);
+            break;
+        }
+#endif
         default:
             croak("unknown format: '%c'", format);
     }
@@ -202,6 +280,21 @@ SV *tbxs_field_to_sv(char format, void *data, size_t size) {
             sv = newSVpvn(data, size);
             SvUTF8_on(sv);
             break;
+#ifdef WITH_CP1251
+        case '<': {
+            SV *cp1251_sv = newSVpvn(data, size);
+            sv = tbxs_decode_cp1251(cp1251_sv);
+            SvREFCNT_dec(cp1251_sv);
+            break;
+        }
+        case '>': {
+            SV *utf8_sv = newSVpvn(data, size);
+            SvUTF8_on(utf8_sv);
+            sv = tbxs_encode_cp1251(utf8_sv);
+            SvREFCNT_dec(utf8_sv);
+            break;
+        }
+#endif
         default:
             croak("unknown format: '%c'", format);
     }
@@ -1139,6 +1232,9 @@ BOOT:
     MY_CXT_INIT;
     MY_CXT.namespaces = newHV();
     MY_CXT.functions = newHV();
+#ifdef WITH_CP1251
+    MY_CXT.cp1251 = tbxs_find_cp1251();
+#endif
 #ifdef WITH_MATH_INT64
     PERL_MATH_INT64_LOAD_OR_CROAK;
 #endif
