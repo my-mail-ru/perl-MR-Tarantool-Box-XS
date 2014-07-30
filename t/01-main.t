@@ -47,7 +47,7 @@ my $dispatch = MR::Tarantool::Box::XS->new(
     ],
 );
 
-my $lua_iproto = MR::IProto::XS->new(masters => ['5.61.233.77:33300']);
+my $lua_iproto = MR::IProto::XS->new(masters => [$ENV{SHARD_SERVER}]);
 my $echo = MR::Tarantool::Box::XS::Function->new(
     iproto     => $lua_iproto,
     name       => 'client_autotest.echo',
@@ -616,7 +616,7 @@ sub check_pack {
         $resp = $ns->do({ type => 'select', keys => [ $TEST3_ID ] });
         is($resp->{tuples}->[0]->{Str}, Encode::encode('cp1251', "Строка"), "string in cp1251 field is realy in cp1251");
 
-        my $resp = $utf8_ns->do({ type => 'insert', tuple => [ $TEST3_ID, Encode::encode('cp1251', "Строка") ], want_result => 1 });
+        $resp = $utf8_ns->do({ type => 'insert', tuple => [ $TEST3_ID, Encode::encode('cp1251', "Строка") ], want_result => 1 });
         ok(!utf8::is_utf8($resp->{tuple}->{Str}), "string returned from utf8 field has no utf8 flag");
         is($resp->{tuple}->{Str}, Encode::encode('cp1251', "Строка"), "string returned from utf8 field is in cp1251");
         $resp = $ns->do({ type => 'select', keys => [ $TEST3_ID ] });
@@ -686,12 +686,12 @@ sub check_singleton {
         isa_ok($singleton, "Test::Function", "remove_singleton()");
     }
     {
-        Test::IProto->create_singleton(masters => ['188.93.61.208:30000']);
+        Test::IProto->create_singleton(masters => [$ENV{SHARD_SERVER}]);
         my $namespace = MR::Tarantool::Box::XS->new(
             iproto    => 'Test::IProto',
             namespace => 22,
             format    => 'lLLll &&&&& LLl & LLLLLLLLLLLL',
-            fields    => [qw/ ID BirthdayMonth BirthdayDay Owner SubjectID Email Nick FirstName LastName MaidenName BirthdayYear Sex Region avatar_data MyAccess AccessJournal AccessUmask AccessAntiUmask AccessDefaultMask AccessCanChangeMask Flags Flags2 Flags3 Flags4 CreateTime MyCreateTime /],
+            fields    => [qw/ ID Bi1 Bi2 F3 F4 F5 F6 F7 F8 SubStr F10 F11 F12 F13 Bits F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 /],
             indexes   => [ { name => 'id', keys => ['ID'] } ],
         );
         my $resp = $namespace->do({ type => 'select', keys => [1000011658] });
@@ -699,7 +699,7 @@ sub check_singleton {
         Test::IProto->remove_singleton();
     }
     {
-        Test::IProto->create_singleton(masters => ['5.61.233.77:33300']);
+        Test::IProto->create_singleton(masters => [$ENV{SHARD_SERVER}]);
         my $function = MR::Tarantool::Box::XS::Function->new(
             iproto     => 'Test::IProto',
             name       => 'client_autotest.echo',
