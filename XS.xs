@@ -213,8 +213,14 @@ void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
             tbxs_check_value(int8_t, SvIVX(value) >= INT8_MIN && SvIVX(value) <= INT8_MAX, data, errsv, IVdf, SvIVX(value));
             break;
         case '&':
+            data = SvPV(value, *size);
+            break;
         case '$':
             data = SvPV(value, *size);
+            if (!is_utf8_string(data, *size)) {
+                data = NULL;
+                sv_setpv(errsv, SvUTF8(value) ? "malformed UTF-8 character string" : "malformed UTF-8 octet string");
+            }
             break;
 #ifdef WITH_CP1251
         case '<': {
@@ -810,11 +816,11 @@ tarantoolbox_message_t *tbxs_update_hv_to_message(HV *request, SV *errsv) {
         tarantoolbox_tuple_t *key = tbxs_fetch_key(request, ns, errsv);
         if (key) {
             message = tarantoolbox_update_init(ns->namespace, key, ops, flags);
+            tbxs_set_message_cluster(message, ns->cluster);
             tarantoolbox_tuple_free(key);
         }
         tarantoolbox_update_ops_free(ops);
     }
-    tbxs_set_message_cluster(message, ns->cluster);
     return message;
 }
 
@@ -1317,14 +1323,16 @@ ns_DESTROY(namespace)
     CODE:
         tbns_t *ns = tbxs_extract_ns(namespace);
         if (!ns) croak("DESTROY should be called as an instance method");
-        SvREFCNT_dec(ns->cluster);
-        SvREFCNT_dec(ns->tuple.fields);
-        SvREFCNT_dec(ns->tuple.field_id_by_name);
-        SvREFCNT_dec(ns->tuple.format);
-        SvREFCNT_dec(ns->indexes);
-        SvREFCNT_dec(ns->index_id_by_name);
-        SvREFCNT_dec(ns->index_format);
-        SvREFCNT_dec(ns->index_fields);
+        if (!PL_dirty) {
+            SvREFCNT_dec(ns->cluster);
+            SvREFCNT_dec(ns->tuple.fields);
+            SvREFCNT_dec(ns->tuple.field_id_by_name);
+            SvREFCNT_dec(ns->tuple.format);
+            SvREFCNT_dec(ns->indexes);
+            SvREFCNT_dec(ns->index_id_by_name);
+            SvREFCNT_dec(ns->index_format);
+            SvREFCNT_dec(ns->index_fields);
+        }
         free(ns);
 
 MR::Tarantool::Box::XS
@@ -1456,16 +1464,18 @@ fn_DESTROY(function)
         tbfunc_t *func = tbxs_extract_func(function);
         if (!func)
             croak("DESTROY should be called as an instance method");
-        SvREFCNT_dec(func->cluster);
-        free(func->name);
-        SvREFCNT_dec(func->in.fields);
-        SvREFCNT_dec(func->in.field_id_by_name);
-        SvREFCNT_dec(func->in.format);
-        for (uint32_t i = 0; i < func->out_count; i++) {
-            SvREFCNT_dec(func->out[i].fields);
-            SvREFCNT_dec(func->out[i].field_id_by_name);
-            SvREFCNT_dec(func->out[i].format);
+        if (!PL_dirty) {
+            SvREFCNT_dec(func->cluster);
+            SvREFCNT_dec(func->in.fields);
+            SvREFCNT_dec(func->in.field_id_by_name);
+            SvREFCNT_dec(func->in.format);
+            for (uint32_t i = 0; i < func->out_count; i++) {
+                SvREFCNT_dec(func->out[i].fields);
+                SvREFCNT_dec(func->out[i].field_id_by_name);
+                SvREFCNT_dec(func->out[i].format);
+            }
         }
+        free(func->name);
         free(func->out);
         free(func);
 
