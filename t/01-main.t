@@ -529,6 +529,7 @@ sub check_pack {
 
     SKIP: {
         skip "Math::Int64", 8 unless $math_int64;
+        require Math::Int64;
 
         isa_ok($resp->{tuples}->[0]->{UInt64}, 'Math::UInt64', "UInt64");
         isa_ok($resp->{tuples}->[0]->{Int64}, 'Math::Int64', "Int64");

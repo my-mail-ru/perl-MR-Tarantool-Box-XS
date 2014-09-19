@@ -61,18 +61,18 @@ typedef SV * MR__Tarantool__Box__XS__Function;
 #endif
 
 #ifdef WITH_RANGE_CHECK
-#define tbxs_check_value(type, condition, data, errsv, pf, pv) \
+#define tbxs_check_value(type, condition, data, errsv, pv) \
     do { \
         if (!(condition)) { \
             data = NULL; \
-            sv_setpvf(errsv, "value %"pf" is out of range for "#type, pv); \
+            sv_setpvf(errsv, "value %s is out of range for "#type, SvPV_nolen(pv)); \
         } \
     } while (0)
 #else
-#define tbxs_check_value(type, condition, data, errsv, pf, pv) \
+#define tbxs_check_value(type, condition, data, errsv, pv) \
     do { \
         if (!(condition)) { \
-            warn("value %"pf" is out of range for "#type, pv); \
+            warn("value %s is out of range for "#type, SvPV_nolen(pv)); \
         } \
     } while (0)
 #endif
@@ -138,7 +138,7 @@ static SV *tbxs_encode_cp1251(SV *sv) {
 }
 #endif
 
-void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
+static void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv, bool range_check) {
     void *data;
     switch (format) {
 #ifdef WITH_MATH_INT64
@@ -159,58 +159,66 @@ void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv) {
             SvUV(value);
             data = &SvUVX(value);
             *size = sizeof(uint64_t);
-            tbxs_check_value(uint64_t, SvIOK_UV(value) || SvUVX(value) <= INT64_MAX, data, errsv, IVdf, SvIVX(value));
+            if (range_check)
+                tbxs_check_value(uint64_t, SvIOK_UV(value) || SvUVX(value) <= INT64_MAX, data, errsv, value);
             break;
         case 'q':
             SvIV(value);
             data = &SvIVX(value);
             *size = sizeof(int64_t);
-            tbxs_check_value(int64_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, UVuf, SvUVX(value));
+            if (range_check)
+                tbxs_check_value(int64_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, value);
             break;
 #endif
         case 'L':
             SvUV(value);
             data = &SvUVX(value);
             *size = sizeof(uint32_t);
+            if (range_check)
 #if UVSIZE > U32SIZE
-            tbxs_check_value(uint32_t, SvUVX(value) <= UINT32_MAX, data, errsv, IVdf, SvIVX(value));
+                tbxs_check_value(uint32_t, SvUVX(value) <= UINT32_MAX, data, errsv, value);
 #else
-            tbxs_check_value(uint32_t, SvIOK_UV(value) || SvUVX(value) <= INT32_MAX, data, errsv, IVdf, SvIVX(value));
+                tbxs_check_value(uint32_t, SvIOK_UV(value) || SvUVX(value) <= INT32_MAX, data, errsv, value);
 #endif
             break;
         case 'l':
             SvIV(value);
             data = &SvIVX(value);
             *size = sizeof(int32_t);
+            if (range_check)
 #if IVSIZE > I32SIZE
-            tbxs_check_value(int32_t, SvIVX(value) >= INT32_MIN && SvIVX(value) <= INT32_MAX, data, errsv, IVdf, SvIVX(value));
+                tbxs_check_value(int32_t, SvIVX(value) >= INT32_MIN && SvIVX(value) <= INT32_MAX, data, errsv, value);
 #else
-            tbxs_check_value(int32_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, UVuf, SvUVX(value));
+                tbxs_check_value(int32_t, SvIOK_notUV(value) || SvIVX(value) >= 0, data, errsv, value);
 #endif
             break;
         case 'S':
             SvUV(value);
             data = &SvUVX(value);
             *size = sizeof(uint16_t);
-            tbxs_check_value(uint16_t, SvUVX(value) <= UINT16_MAX, data, errsv, IVdf, SvIVX(value));
+            if (range_check)
+                tbxs_check_value(uint16_t, SvUVX(value) <= UINT16_MAX, data, errsv, value);
             break;
         case 's':
             SvIV(value);
             data = &SvIVX(value);
             *size = sizeof(int16_t);
-            tbxs_check_value(int16_t, SvIVX(value) >= INT16_MIN && SvIVX(value) <= INT16_MAX, data, errsv, IVdf, SvIVX(value));
+            if (range_check)
+                tbxs_check_value(int16_t, SvIVX(value) >= INT16_MIN && SvIVX(value) <= INT16_MAX, data, errsv, value);
             break;
         case 'C':
             SvUV(value);
             data = &SvUVX(value);
             *size = sizeof(uint8_t);
-            tbxs_check_value(uint8_t, SvUVX(value) <= UINT8_MAX, data, errsv, IVdf, SvIVX(value));
+            if (range_check)
+                tbxs_check_value(uint8_t, SvUVX(value) <= UINT8_MAX, data, errsv, value);
             break;
         case 'c':
             SvIV(value);
             data = &SvIVX(value);
             *size = sizeof(int8_t);
-            tbxs_check_value(int8_t, SvIVX(value) >= INT8_MIN && SvIVX(value) <= INT8_MAX, data, errsv, IVdf, SvIVX(value));
+            if (range_check)
+                tbxs_check_value(int8_t, SvIVX(value) >= INT8_MIN && SvIVX(value) <= INT8_MAX, data, errsv, value);
             break;
         case '&':
             data = SvPV(value, *size);
@@ -317,7 +325,7 @@ tarantoolbox_tuple_t *tbxs_av_to_tuple(AV *av, SV *formatsv, SV *errsv) {
         size_t size;
         void *data;
         if (format && i < formatlen) {
-            data = tbxs_sv_to_field(format[i], value, &size, errsv);
+            data = tbxs_sv_to_field(format[i], value, &size, errsv, true);
             if (data == NULL) {
                 tarantoolbox_tuple_free(tuple);
                 return NULL;
@@ -422,7 +430,7 @@ tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *err
     SV *format = *val;
     if (SvFieldOK(sv)) {
         size_t size;
-        void *data = tbxs_sv_to_field(SvPVX(format)[0], sv, &size, errsv);
+        void *data = tbxs_sv_to_field(SvPVX(format)[0], sv, &size, errsv, true);
         if (data == NULL) return NULL;
         tarantoolbox_tuple_t *tuple = tarantoolbox_tuple_init(1);
         tarantoolbox_tuple_set_field(tuple, 0, data, size);
@@ -681,6 +689,10 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
             croak("op should be a string");
         char *opstr = SvPV_nolen(*val);
 
+        STRLEN formatlen;
+        char *format = SvPV(conf->format, formatlen);
+        char f = field_num < formatlen ? format[field_num] : '&';
+
         SV *value;
         int32_t offset;
         int32_t length;
@@ -749,21 +761,23 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
             }
         }
 
-        size_t size;
-        void *data;
+        bool range_check;
         switch (op) {
-            case UPDATE_OP_ADD:
-                SvIV(value);
-                data = &SvIVX(value);
-                size = sizeof(int32_t);
-                break;
             case UPDATE_OP_AND:
             case UPDATE_OP_XOR:
             case UPDATE_OP_OR:
-                SvUV(value);
-                data = &SvUVX(value);
-                size = sizeof(uint32_t);
+                f = toUPPER(f);
+                range_check = false;
                 break;
+            case UPDATE_OP_ADD:
+                f = toLOWER(f);
+            default:
+                range_check = true;
+        }
+
+        size_t size;
+        void *data;
+        switch (op) {
             case UPDATE_OP_SPLICE:
                 if (value && SvOK(value)) {
                     data = SvPV(value, size);
@@ -777,16 +791,10 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
                 size = 0;
                 break;
             default: {
-                STRLEN formatlen;
-                char *format = SvPV(conf->format, formatlen);
-                if (field_num < formatlen) {
-                    data = tbxs_sv_to_field(format[field_num], value, &size, errsv);
-                    if (data == NULL) {
-                        tarantoolbox_update_ops_free(ops);
-                        return NULL;
-                    }
-                } else {
-                    data = SvPV(value, size);
+                data = tbxs_sv_to_field(f, value, &size, errsv, range_check);
+                if (data == NULL) {
+                    tarantoolbox_update_ops_free(ops);
+                    return NULL;
                 }
             }
         }
@@ -1000,7 +1008,7 @@ static void tbtupleconf_set_format(tbtupleconf_t *conf, SV *value) {
     for (STRLEN i = 0; i < SvCUR(value); i++) {
         if (!isSPACE(format0[i])) {
             size_t size;
-            tbxs_sv_to_field(format0[i], test, &size, NULL);
+            tbxs_sv_to_field(format0[i], test, &size, NULL, true);
             format[j++] = format0[i];
         }
     }
