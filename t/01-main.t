@@ -1,26 +1,31 @@
 use strict;
 use warnings;
-use Test::More tests => 112;
+use Test::More tests => 121;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use Getopt::Long;
 use MR::IProto::XS;
 BEGIN { use_ok('MR::Tarantool::Box::XS') };
 use Encode;
+use AnyEvent;
 use utf8;
 
 my $range_check;
 my $math_int64;
 my $cp1251;
+my $default_loop;
 GetOptions(
-    'range-check!' => \$range_check,
-    'math-int64!'  => \$math_int64,
-    'cp1251!'      => \$cp1251,
+    'range-check!'  => \$range_check,
+    'math-int64!'   => \$math_int64,
+    'cp1251!'       => \$cp1251,
+    'default-loop!' => \$default_loop,
 );
 
 my $TEST_ID = 1999999999;
 my $TEST2_ID = 1999999998;
 my $TEST3_ID = 1999999997;
+
+MR::IProto::XS->set_ev_loop(EV::default_loop) if $default_loop;
 
 MR::IProto::XS->set_logmask(MR::IProto::XS::LOG_NOTHING);
 MR::Tarantool::Box::XS->set_logmask(MR::Tarantool::Box::XS::LOG_NOTHING);
@@ -82,6 +87,7 @@ check_multicluster();
 check_pack();
 check_singleton();
 check_info();
+check_async();
 check_leak();
 
 sub check_select {
@@ -95,7 +101,8 @@ sub check_select {
         type    => 'select',
         keys    => [1000011658, 1000011659],
     }]);
-    is($resp->[0]->{tuples}->[0]->{ID}, 1000011658, "select list by id");
+    is($resp->[0]->{tuples}->[0]->{ID}, 1000011658, "select list by id 1");
+    is($resp->[0]->{tuples}->[1]->{ID}, 1000011659, "select list by id 2");
 
     $resp = $dispatch->bulk([{
         type    => 'select',
@@ -579,12 +586,15 @@ sub check_pack {
     is($resp->[1]->{tuple}->{Utf8String}, "Строка в utf8", "pack utf8 string as utf8 - ok");
 
     my $cp1251_with_flag = Encode::encode('cp1251', "Строка в cp1251");
-    utf8::decode($cp1251_with_flag);
+    Encode::_utf8_on($cp1251_with_flag);
     my $utf8_without_flag = "Строка в utf8";
-    utf8::encode($utf8_without_flag);
+    Encode::_utf8_off($utf8_without_flag);
     $resp = $ns->bulk([ $set->(String => $cp1251_with_flag), $set->(Utf8String => $utf8_without_flag) ]);
     is($resp->[0]->{tuple}->{String}, Encode::encode('cp1251', "Строка в cp1251"), "pack utf8 string as non-utf8 - ok");
     is($resp->[1]->{tuple}->{Utf8String}, "Строка в utf8", "pack non-utf8 string as utf8 - ok");
+
+    $resp = $ns->do($set->(Utf8String => $cp1251_with_flag));
+    cmp_ok($resp->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "malformed utf-8 string - invalid request");
 
     SKIP: {
         skip "check cp1251 <=> utf8", 6 unless $cp1251;
@@ -723,6 +733,101 @@ sub check_info {
     return;
 }
 
+sub check_async {
+    SKIP: {
+        skip "cannot check async when internal loop is used", 4 unless $default_loop;
+
+        {
+            my $resp;
+            my $cv = AnyEvent->condvar();
+            $dispatch->do({
+                type     => 'select',
+                keys     => [1000011658, 1000011659],
+                callback => sub { $resp = $_[0]; $cv->send(); },
+            });
+            $cv->recv();
+            is($resp->{tuples}->[0]->{ID}, 1000011658, "async select do");
+        }
+
+        {
+            my @resp;
+            my $cv = AnyEvent->condvar();
+            $dispatch->bulk([{
+                type     => 'select',
+                keys     => [1000011658, 1000011659],
+                callback => sub { push @resp, $_[0]; $cv->send() },
+            }]);
+            $cv->recv();
+            is($resp[0]->{tuples}->[0]->{ID}, 1000011658, "async select list by id");
+        }
+
+        my $ns = MR::Tarantool::Box::XS->new(
+            iproto    => $shard_iproto,
+            namespace => 23,
+            format    => 'l$',
+            fields    => [qw/ ID Utf8String / ],
+            indexes   => [ { name => 'id', keys => ['ID'] } ],
+        );
+
+        {
+            my $cp1251_with_flag = Encode::encode('cp1251', "Строка в cp1251");
+            Encode::_utf8_on($cp1251_with_flag);
+            my $cv = AnyEvent->condvar();
+            my $resp;
+            $ns->do({
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ Utf8String => set => $cp1251_with_flag ] ],
+                callback => sub { $resp = $_[0]; $cv->send() },
+            });
+            $cv->recv();
+            cmp_ok($resp->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "async invalid do request");
+        }
+
+        {
+            my $cp1251_with_flag = Encode::encode('cp1251', "Строка в cp1251");
+            Encode::_utf8_on($cp1251_with_flag);
+            my $cv = AnyEvent->condvar();
+            my $resp;
+            $ns->bulk([{
+                type => 'update',
+                key  => $TEST3_ID,
+                ops  => [ [ Utf8String => set => $cp1251_with_flag ] ],
+                callback => sub { $resp = $_[0]; $cv->send() },
+            }]);
+            $cv->recv();
+            cmp_ok($resp->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_REQUEST, "async invalid bulk request");
+        }
+
+        {
+            my $resp;
+            my $cv = AnyEvent->condvar();
+            my %tuple = ( one => 1, two => 'two', three => 3 );
+            $echo->do({
+                type  => 'call',
+                tuple => \%tuple,
+                callback => sub { $resp = $_[0]; $cv->send() },
+            });
+            $cv->recv();
+            is_deeply($resp->{tuples}, [ \%tuple ], "async do function");
+        }
+
+        {
+            my $resp;
+            my $cv = AnyEvent->condvar();
+            my %tuple = ( one => 1, two => 'two', three => 3 );
+            $echo->bulk([{
+                type  => 'call',
+                tuple => \%tuple,
+                callback => sub { $resp = $_[0]; $cv->send() },
+            }]);
+            $cv->recv();
+            is_deeply($resp->{tuples}, [ \%tuple ], "async bulk function");
+        }
+    }
+    return;
+}
+
 sub check_leak {
     no warnings 'redefine';
     local *main::is = sub {};
@@ -740,5 +845,6 @@ sub check_leak {
     no_leaks_ok { check_pack() } "various pack/unpack not leaks";
     no_leaks_ok { check_singleton() } "singleton not leaks";
     no_leaks_ok { check_info() } "info not leaks";
+    no_leaks_ok { check_async() } "async not leaks";
     return;
 }

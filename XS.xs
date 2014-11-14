@@ -50,9 +50,42 @@ typedef struct {
     tbtupleconf_t *out;
 } tbfunc_t;
 
+typedef struct {
+    SV *callback;
+    tarantoolbox_message_t *message;
+    HV *request;
+    SV *errsv;
+} tbxs_data_t;
+
 typedef SV * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 typedef SV * MR__Tarantool__Box__XS__Function;
+
+HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, SV *errsv);
+
+static void tbxs_call_callback(SV *callback, HV *response) {
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    mXPUSHs(newRV_noinc((SV *)response));
+    PUTBACK;
+    call_sv(callback, G_EVAL|G_DISCARD);
+    SPAGAIN;
+    if (SvTRUE(ERRSV)) {
+        warn("MR::Tarantool::Box::XS: died in callback: %s", SvPV_nolen(ERRSV));
+    }
+    FREETMPS;
+    LEAVE;
+}
+
+static void tbxs_callback(iproto_message_t *message) {
+    tbxs_data_t *data = (tbxs_data_t *)iproto_message_options(message)->data;
+    SV *callback = SvREFCNT_inc(data->callback);
+    HV *response = tbxs_message_to_hv(data->message, data->request, data->errsv);
+    tbxs_call_callback(callback, response);
+    SvREFCNT_dec(callback);
+}
 
 #ifdef WITH_MATH_INT64
 #define SvFieldOK(sv) (SvPOK(sv) || SvIOK(sv) || SvI64OK(sv) || SvU64OK(sv))
@@ -553,6 +586,16 @@ static SV *tbxs_fetch_hash_by(HV *request, tbtupleconf_t *conf) {
     return NULL;
 }
 
+static SV *tbxs_fetch_callback(HV *request) {
+    SV **val;
+    if ((val = hv_fetch(request, "callback", 8, 0))) {
+        if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
+            croak("\"callback\" should be a CODEREF");
+        return *val;
+    }
+    return NULL;
+}
+
 static void tbxs_set_message_cluster(tarantoolbox_message_t *message, SV *clustersv) {
     iproto_cluster_t *cluster = iprotoxs_instance_to_cluster(clustersv);
     iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
@@ -959,6 +1002,20 @@ tarantoolbox_message_t *tbxs_hv_to_message(HV *request, SV *errsv) {
         iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
         iproto_message_opts_t *opts = iproto_message_options(imessage);
         iprotoxs_parse_opts(opts, request);
+
+        tbxs_data_t *optsdata;
+        Newxz(optsdata, 1, tbxs_data_t);
+
+        SV *callback = tbxs_fetch_callback(request);
+        if (callback) {
+            opts->callback = tbxs_callback;
+            optsdata->callback = SvREFCNT_inc(callback);
+            optsdata->message = message;
+            optsdata->request = (HV *)SvREFCNT_inc((SV *)request);
+            optsdata->errsv = errsv;
+        }
+
+        opts->data = optsdata;
     }
     return message;
 }
@@ -984,6 +1041,15 @@ HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, SV *errsv) 
                     tbxs_affected_message_to_hv(message, result, request);
             }
         }
+
+        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
+        tbxs_data_t *optsdata = (tbxs_data_t *)iproto_message_options(imessage)->data;
+        if (optsdata->callback) {
+            SvREFCNT_dec(optsdata->callback);
+            SvREFCNT_dec(optsdata->request);
+        }
+        Safefree(optsdata);
+
         tarantoolbox_message_free(message);
     } else if (!SvIOK(errsv)) {
         sv_setuv(errsv, ERR_CODE_INVALID_REQUEST);
@@ -1215,14 +1281,28 @@ static AV *tbxs_bulk(AV *list, struct timeval *timeout) {
     for (uint32_t i = 0; i < nmessages; i++)
         imessages[i] = tarantoolbox_message_get_iproto_message(messages[i]);
     iproto_bulk(imessages, nmessages, timeout);
-    Safefree(imessages);
     AV *result = newAV();
     uint32_t j = 0;
     for (I32 i = 0; i < listsize; i++) {
-        SV **sv = av_fetch(list, i, 0);
-        HV *response = tbxs_message_to_hv(SvOK(errors[i]) ? NULL : messages[j++], (HV *)SvRV(*sv), errors[i]);
-        av_push(result, newRV_noinc((SV *)response));
+        HV *request = (HV *)SvRV(*av_fetch(list, i, 0));
+        HV *response;
+        tarantoolbox_message_t *message = SvOK(errors[i]) ? NULL : messages[j];
+        if (message) {
+            iproto_message_opts_t *iopts = iproto_message_options(imessages[j]);
+            response = iopts->callback ? NULL
+                : tbxs_message_to_hv(message, request, errors[i]);
+            j++;
+        } else {
+            response = tbxs_message_to_hv(message, request, errors[i]);
+            SV *callback = tbxs_fetch_callback(request);
+            if (callback) {
+                tbxs_call_callback(callback, response);
+                response = NULL;
+            }
+        }
+        av_push(result, response ? newRV_noinc((SV *)response) : &PL_sv_undef);
     }
+    Safefree(imessages);
     Safefree(errors);
     Safefree(messages);
     return (AV *)sv_2mortal((SV *)result);
@@ -1234,6 +1314,15 @@ static HV *tbxs_do(HV *request, struct timeval *timeout) {
     if (message) {
         iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
         iproto_do(imessage, timeout);
+        iproto_message_opts_t *iopts = iproto_message_options(imessage);
+        if (iopts->callback)
+            return NULL;
+    } else {
+        SV *callback = tbxs_fetch_callback(request);
+        if (callback) {
+            tbxs_call_callback(callback, tbxs_message_to_hv(message, request, error));
+            return NULL;
+        }
     }
     HV *response = tbxs_message_to_hv(message, request, error);
     return (HV *)sv_2mortal((SV *)response);
@@ -1377,10 +1466,9 @@ ns_bulk(namespace, list, ...)
                 if (!(sv && SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVHV))
                     croak("Message should be a HASHREF");
                 HV *request = (HV *)SvRV(*sv);
-                if (!hv_exists(request, "namespace", 9)) {
-                    (void)hv_store(request, "namespace", 9, SvREFCNT_inc(namespace), 0);
-                    SAVEDELETE(request, savepvn("namespace", 9), 9);
-                }
+                sv = hv_fetch(request, "namespace", 9, 1);
+                if (sv && !SvOK(*sv))
+                    sv_setsv(*sv, namespace);
             }
         }
         RETVAL = tbxs_bulk(list, timeout);
@@ -1393,11 +1481,14 @@ ns_do(namespace, request, ...)
         HV *request
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        if (namespace && !hv_exists(request, "namespace", 9)) {
-            (void)hv_store(request, "namespace", 9, SvREFCNT_inc(namespace), 0);
-            SAVEDELETE(request, savepvn("namespace", 9), 9);
+        if (namespace) {
+            SV **sv = hv_fetch(request, "namespace", 9, 1);
+            if (sv && !SvOK(*sv))
+                sv_setsv(*sv, namespace);
         }
         RETVAL = tbxs_do(request, timeout);
+        if (RETVAL == NULL)
+            XSRETURN_UNDEF;
     OUTPUT:
         RETVAL
 
@@ -1542,6 +1633,8 @@ fn_do(function, request, ...)
                 sv_setsv(*sv, function);
         }
         RETVAL = tbxs_do(request, timeout);
+        if (RETVAL == NULL)
+            XSRETURN_UNDEF;
     OUTPUT:
         RETVAL
 
