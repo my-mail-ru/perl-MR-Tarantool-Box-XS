@@ -18,10 +18,9 @@ Release:        1%{?dist}
 
 Summary:        high performance tarantool/octopus box client
 License:        BSD
-Group:          MAIL.RU
+Group:          MAILRU
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-buildroot
-BuildRequires:  git
 BuildRequires:  perl(ExtUtils::MakeMaker), perl(Test::More)
 BuildRequires:  libtarantoolbox-devel >= %{__libtarantoolboxdevel_version}
 BuildRequires:  libtarantoolbox >= %{__libtarantoolbox_version}
