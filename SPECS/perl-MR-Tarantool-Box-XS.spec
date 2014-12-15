@@ -6,8 +6,6 @@
 %endif
 %bcond_without cp1251
 
-%define _prefix /usr/local
-
 %define __libtarantoolbox_version 20130905.1741
 %define __libtarantoolboxdevel_version 20131118.1649
 %define __iprotoxs_version 20130911.1746
