@@ -1024,7 +1024,7 @@ HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, SV *errsv) 
     SV **val = hv_fetch(request, "inplace", 7, 0);
     HV *result = val && SvTRUE(*val) ? (HV *)SvREFCNT_inc((SV *)request) : newHV();
     if (message) {
-        char *error_string;
+        const char *error_string;
         tarantoolbox_error_t error = tarantoolbox_message_error(message, &error_string);
         sv_setpv(errsv, error_string);
         sv_setuv(errsv, error);
