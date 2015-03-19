@@ -6,8 +6,7 @@
 %endif
 %bcond_without cp1251
 
-%define __libtarantoolbox_version 20130905.1741
-%define __libtarantoolboxdevel_version 20131118.1649
+%define __libtarantoolbox_version 20141215.1935
 %define __iprotoxs_version 20130911.1746
 
 Name:           perl-MR-Tarantool-Box-XS
@@ -20,7 +19,7 @@ Group:          MAILRU
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-buildroot
 BuildRequires:  perl(ExtUtils::MakeMaker), perl(Test::More)
-BuildRequires:  libtarantoolbox-devel >= %{__libtarantoolboxdevel_version}
+BuildRequires:  libtarantoolbox-devel >= %{__libtarantoolbox_version}
 BuildRequires:  libtarantoolbox >= %{__libtarantoolbox_version}
 BuildRequires:  perl-MR-IProto-XS-devel >= %{__iprotoxs_version}
 BuildRequires:  perl-MR-IProto-XS >= %{__iprotoxs_version}
