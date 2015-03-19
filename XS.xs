@@ -1333,6 +1333,7 @@ MODULE = MR::Tarantool::Box::XS		PACKAGE = MR::Tarantool::Box::XS		PREFIX = ns_
 PROTOTYPES: ENABLE
 
 BOOT:
+    load_module(0, newSVpvn("MR::IProto::XS", 14), NULL, NULL);
     tarantoolbox_initialize();
     HV *stash = gv_stashpv("MR::Tarantool::Box::XS", 1);
 #define TBXS_CONST(s, ...) do { \
