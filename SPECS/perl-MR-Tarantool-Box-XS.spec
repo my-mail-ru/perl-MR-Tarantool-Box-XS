@@ -6,7 +6,7 @@
 %endif
 %bcond_without cp1251
 
-%define __libtarantoolbox_version 20141215.1935
+%define __libtarantoolbox_version 20160404.1859
 %define __iprotoxs_version 20130911.1746
 
 Name:           perl-MR-Tarantool-Box-XS
