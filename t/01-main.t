@@ -10,22 +10,27 @@ use Encode;
 use AnyEvent;
 use utf8;
 
-my $range_check;
-my $math_int64;
-my $cp1251;
-my $default_loop;
-GetOptions(
-    'range-check!'  => \$range_check,
-    'math-int64!'   => \$math_int64,
-    'cp1251!'       => \$cp1251,
-    'default-loop!' => \$default_loop,
-);
+my ($range_check, $math_int64, $cp1251, $ev, $coro);
+BEGIN {
+    GetOptions(
+        'range-check!'  => \$range_check,
+        'math-int64!'   => \$math_int64,
+        'cp1251!'       => \$cp1251,
+        'ev!'           => \$ev,
+        'coro!'         => \$coro,
+    );
+    if ($coro) {
+        import MR::IProto::XS 'coro';
+    } elsif ($ev) {
+        import MR::IProto::XS 'ev';
+    }
+}
 
 my $TEST_ID = 1999999999;
 my $TEST2_ID = 1999999998;
 my $TEST3_ID = 1999999997;
 
-MR::IProto::XS->set_ev_loop(EV::default_loop) if $default_loop;
+Coro::async(sub { AnyEvent->condvar->recv() }) if $coro;
 
 MR::IProto::XS->set_logmask(MR::IProto::XS::LOG_NOTHING);
 MR::Tarantool::Box::XS->set_logmask(MR::Tarantool::Box::XS::LOG_NOTHING);
@@ -735,7 +740,7 @@ sub check_info {
 
 sub check_async {
     SKIP: {
-        skip "cannot check async when internal loop is used", 4 unless $default_loop;
+        skip "cannot check async when internal loop is used", 6 unless $ev || $coro;
 
         {
             my $resp;

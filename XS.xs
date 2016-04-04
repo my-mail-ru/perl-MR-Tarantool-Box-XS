@@ -32,7 +32,6 @@ typedef struct {
 } tbtupleconf_t;
 
 typedef struct {
-    SV *cluster;
     uint32_t namespace;
     uint32_t default_index;
     AV *indexes;
@@ -43,7 +42,6 @@ typedef struct {
 } tbns_t;
 
 typedef struct {
-    SV *cluster;
     char *name;
     tbtupleconf_t in;
     uint32_t out_count;
@@ -51,40 +49,53 @@ typedef struct {
 } tbfunc_t;
 
 typedef struct {
-    SV *callback;
+    SV *cluster;
+    uint16_t microsharding;
+    bool is_func;
+    union {
+        tbns_t ns;
+        tbfunc_t func;
+    };
+} tbinst_t;
+
+typedef struct {
+    SV *instance;
+    tbinst_t *inst;
+    SV *request;
+    tarantoolbox_message_type_t type;
     tarantoolbox_message_t *message;
-    HV *request;
-    SV *errsv;
+    SV *error;
+    SV *callback;
 } tbxs_data_t;
 
 typedef SV * MR__IProto__XS;
 typedef SV * MR__Tarantool__Box__XS;
 typedef SV * MR__Tarantool__Box__XS__Function;
 
-HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, SV *errsv);
+static SV *tbxs_context_response(tbxs_data_t *context);
+static void tbxs_context_free(tbxs_data_t *context);
 
-static void tbxs_call_callback(SV *callback, HV *response) {
+static void tbxs_context_callback(tbxs_data_t *context) {
     dSP;
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);
-    mXPUSHs(newRV_noinc((SV *)response));
+    mXPUSHs(tbxs_context_response(context));
     PUTBACK;
-    call_sv(callback, G_EVAL|G_DISCARD);
+    call_sv(context->callback, G_EVAL|G_DISCARD);
     SPAGAIN;
     if (SvTRUE(ERRSV)) {
         warn("MR::Tarantool::Box::XS: died in callback: %s", SvPV_nolen(ERRSV));
     }
     FREETMPS;
     LEAVE;
+    tbxs_context_free(context);
 }
 
 static void tbxs_callback(iproto_message_t *message) {
-    tbxs_data_t *data = (tbxs_data_t *)iproto_message_options(message)->data;
-    SV *callback = SvREFCNT_inc(data->callback);
-    HV *response = tbxs_message_to_hv(data->message, data->request, data->errsv);
-    tbxs_call_callback(callback, response);
-    SvREFCNT_dec(callback);
+    tbxs_data_t *context = (tbxs_data_t *)iproto_message_options(message)->data;
+    assert(tarantoolbox_message_get_iproto_message(context->message) == message);
+    tbxs_context_callback(context);
 }
 
 #ifdef WITH_MATH_INT64
@@ -522,34 +533,51 @@ static SV *tbfunc_instance(SV *sv) {
     }
 }
 
-static tbns_t *tbxs_extract_ns(SV *sv) {
+static tbinst_t *tbns_inst(SV *sv) {
     if (!sv)
         return NULL;
     SV *instance = tbns_instance(sv);
-    return instance ? INT2PTR(tbns_t *, SvIV((SV*)SvRV(instance))) : NULL;
+    if (!instance)
+        return NULL;
+    tbinst_t *inst = INT2PTR(tbinst_t *, SvIV((SV*)SvRV(instance)));
+    assert(!inst->is_func);
+    return inst;
 }
 
-static tbfunc_t *tbxs_extract_func(SV *sv) {
+static tbinst_t *tbfunc_inst(SV *sv) {
     if (!sv)
         return NULL;
     SV *instance = tbfunc_instance(sv);
-    return instance ? INT2PTR(tbfunc_t *, SvIV((SV*)SvRV(instance))) : NULL;
+    if (!instance)
+        return NULL;
+    tbinst_t *inst = INT2PTR(tbinst_t *, SvIV((SV*)SvRV(instance)));
+    assert(inst->is_func);
+    return inst;
 }
 
-static tbns_t *tbxs_fetch_ns(HV *request) {
-    SV **sv = hv_fetch(request, "namespace", 9, 0);
-    if (!sv) croak("\"namespace\" should be specified");
-    tbns_t *ns = tbxs_extract_ns(*sv);
-    if (!ns) croak("\"namespace\" should be an instance or a singleton of type MR::Tarantool::Box::XS");
-    return ns;
-}
-
-static tbfunc_t *tbxs_fetch_func(HV *request) {
-    SV **sv = hv_fetch(request, "function", 8, 0);
-    if (!sv) croak("\"function\" should be specified");
-    tbfunc_t *func = tbxs_extract_func(*sv);
-    if (!func) croak("\"function\" should be an instance or a singleton of type MR::Tarantool::Box::XS::Function");
-    return func;
+static tarantoolbox_message_type_t tbxs_fetch_type(SV *request) {
+    HV *reqhv = (HV *)SvRV(request);
+    SV **val = hv_fetch(reqhv, "type", 4, 0);
+    if (!val)
+        croak("\"type\" is required");
+    if (!SvPOK(*val))
+        croak("\"type\" should be a string");
+    char *name = SvPV_nolen(*val);
+    tarantoolbox_message_type_t type;
+    if (strcmp(name, "select") == 0) {
+        type = SELECT;
+    } else if (strcmp(name, "insert") == 0) {
+        type = INSERT;
+    } else if (strcmp(name, "update") == 0) {
+        type = UPDATE_FIELDS;
+    } else if (strcmp(name, "delete") == 0) {
+        type = DELETE;
+    } else if (strcmp(name, "call") == 0) {
+        type = EXEC_LUA;
+    } else {
+        croak("unknown message type: \"%s\"", name);
+    }
+    return type;
 }
 
 tarantoolbox_tuple_t *tbxs_fetch_key(HV *request, tbns_t *ns, SV *errsv) {
@@ -586,9 +614,10 @@ static SV *tbxs_fetch_hash_by(HV *request, tbtupleconf_t *conf) {
     return NULL;
 }
 
-static SV *tbxs_fetch_callback(HV *request) {
-    SV **val;
-    if ((val = hv_fetch(request, "callback", 8, 0))) {
+static SV *tbxs_fetch_callback(SV *request) {
+    HV *reqhv = (HV *)SvRV(request);
+    SV **val = hv_fetch(reqhv, "callback", 8, 0);
+    if (val) {
         if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
             croak("\"callback\" should be a CODEREF");
         return *val;
@@ -602,10 +631,11 @@ static void tbxs_set_message_cluster(tarantoolbox_message_t *message, SV *cluste
     iproto_message_set_cluster(imessage, cluster);
 }
 
-tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, SV *errsv) {
-    SV **val;
-    tbns_t *ns = tbxs_fetch_ns(request);
+static tarantoolbox_message_t *tbxs_select_message_init(tbxs_data_t *context) {
+    tbns_t *ns = &context->inst->ns;
+    HV *request = (HV *)SvRV(context->request);
 
+    SV **val;
     uint32_t index;
     if ((val = hv_fetch(request, "use_index", 9, 0))) {
         if (SvIOK(*val)) {
@@ -658,16 +688,16 @@ tarantoolbox_message_t *tbxs_select_hv_to_message(HV *request, SV *errsv) {
     } else {
         croak("values of \"keys\" should be ARRAY references or SCALARs");
     }
-    tarantoolbox_tuples_t *keys = tbxs_av_to_keys(index, keysav, ns, errsv);
+    tarantoolbox_tuples_t *keys = tbxs_av_to_keys(index, keysav, ns, context->error);
     if (keys == NULL) return NULL;
     tarantoolbox_message_t *message = tarantoolbox_select_init(ns->namespace, index, keys, offset, limit);
     tarantoolbox_tuples_free(keys);
-    tbxs_set_message_cluster(message, ns->cluster);
     return message;
 }
 
-tarantoolbox_message_t *tbxs_insert_hv_to_message(HV *request, SV *errsv) {
-    tbns_t *ns = tbxs_fetch_ns(request);
+static tarantoolbox_message_t *tbxs_insert_message_init(tbxs_data_t * context) {
+    tbns_t *ns = &context->inst->ns;
+    HV *request = (HV *)SvRV(context->request);
 
     SV **val = hv_fetch(request, "tuple", 5, 0);
     if (!val) croak("\"tuple\" is required");
@@ -687,11 +717,10 @@ tarantoolbox_message_t *tbxs_insert_hv_to_message(HV *request, SV *errsv) {
         }
     }
 
-    tarantoolbox_tuple_t *tuple = tbxs_sv_to_tuple(tuplesv, &ns->tuple, errsv);
+    tarantoolbox_tuple_t *tuple = tbxs_sv_to_tuple(tuplesv, &ns->tuple, context->error);
     if (tuple == NULL) return NULL;
     tarantoolbox_message_t *message = tarantoolbox_insert_init(ns->namespace, tuple, flags);
     tarantoolbox_tuple_free(tuple);
-    tbxs_set_message_cluster(message, ns->cluster);
     return message;
 }
 
@@ -852,8 +881,10 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
     return ops;
 }
 
-tarantoolbox_message_t *tbxs_update_hv_to_message(HV *request, SV *errsv) {
-    tbns_t *ns = tbxs_fetch_ns(request);
+static tarantoolbox_message_t *tbxs_update_message_init(tbxs_data_t *context) {
+    tbns_t *ns = &context->inst->ns;
+    HV *request = (HV *)SvRV(context->request);
+
     uint32_t flags = tbxs_fetch_want_result(request);
     SV **val;
     if ((val = hv_fetch(request, "_flags", 6, 0))) {
@@ -862,12 +893,11 @@ tarantoolbox_message_t *tbxs_update_hv_to_message(HV *request, SV *errsv) {
         flags |= SvUV(*val);
     }
     tarantoolbox_message_t *message = NULL;
-    tarantoolbox_update_ops_t *ops = tbxs_fetch_update_ops(request, &ns->tuple, errsv);
+    tarantoolbox_update_ops_t *ops = tbxs_fetch_update_ops(request, &ns->tuple, context->error);
     if (ops) {
-        tarantoolbox_tuple_t *key = tbxs_fetch_key(request, ns, errsv);
+        tarantoolbox_tuple_t *key = tbxs_fetch_key(request, ns, context->error);
         if (key) {
             message = tarantoolbox_update_init(ns->namespace, key, ops, flags);
-            tbxs_set_message_cluster(message, ns->cluster);
             tarantoolbox_tuple_free(key);
         }
         tarantoolbox_update_ops_free(ops);
@@ -875,54 +905,111 @@ tarantoolbox_message_t *tbxs_update_hv_to_message(HV *request, SV *errsv) {
     return message;
 }
 
-tarantoolbox_message_t *tbxs_delete_hv_to_message(HV *request, SV *errsv) {
-    tbns_t *ns = tbxs_fetch_ns(request);
+static tarantoolbox_message_t *tbxs_delete_message_init(tbxs_data_t *context) {
+    tbns_t *ns = &context->inst->ns;
+    HV *request = (HV *)SvRV(context->request);
     uint32_t flags = tbxs_fetch_want_result(request);
-    tarantoolbox_tuple_t *key = tbxs_fetch_key(request, ns, errsv);
+    tarantoolbox_tuple_t *key = tbxs_fetch_key(request, ns, context->error);
     if (key == NULL) return NULL;
     tarantoolbox_message_t *message = tarantoolbox_delete_init(ns->namespace, key, flags);
     tarantoolbox_tuple_free(key);
-    tbxs_set_message_cluster(message, ns->cluster);
     return message;
 }
 
-tarantoolbox_message_t *tbxs_call_hv_to_message(HV *request, SV *errsv) {
-    tbfunc_t *func = tbxs_fetch_func(request);
+static tarantoolbox_message_t *tbxs_call_message_init(tbxs_data_t *context) {
+    tbfunc_t *func = &context->inst->func;
+    HV *request = (HV *)SvRV(context->request);
 
     SV **val = hv_fetch(request, "tuple", 5, 0);
     if (!val) croak("\"tuple\" is required");
     SV *tuplesv = *val;
 
-    tarantoolbox_tuple_t *tuple = tbxs_sv_to_tuple(tuplesv, &func->in, errsv);
+    tarantoolbox_tuple_t *tuple = tbxs_sv_to_tuple(tuplesv, &func->in, context->error);
     if (tuple == NULL) return NULL;
     tarantoolbox_message_t *message = tarantoolbox_call_init(func->name, tuple, 0);
     tarantoolbox_tuple_free(tuple);
-    tbxs_set_message_cluster(message, func->cluster);
     return message;
 }
 
-void tbxs_selected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *request) {
+static tarantoolbox_message_t *tbxs_message_init(tbxs_data_t *context) {
+    tarantoolbox_message_t *message;
+    switch (context->type) {
+        case SELECT:
+            message = tbxs_select_message_init(context);
+            break;
+        case INSERT:
+            message = tbxs_insert_message_init(context);
+            break;
+        case UPDATE_FIELDS:
+            message = tbxs_update_message_init(context);
+            break;
+        case DELETE:
+            message = tbxs_delete_message_init(context);
+            break;
+        case EXEC_LUA:
+            message = tbxs_call_message_init(context);
+            break;
+        default:
+            message = NULL;
+    }
+    if (message != NULL) {
+        HV *reqhv = (HV *)SvRV(context->request);
+
+        unsigned shard_num = 0;
+        uint16_t microsharding = context->inst->microsharding;
+        if (microsharding) {
+            SV **val = hv_fetch(reqhv, "shard_num", 9, 0);
+            if (!val)
+                croak("\"shard_num\" should exist if microsharding is used");
+            if (!(SvIOK(*val) || looks_like_number(*val)))
+                croak("Invalid \"shard_num\" value: \"%s\"", SvPV_nolen(*val));
+            UV num = SvUV(*val);
+            if (num < 1 || num > microsharding)
+                croak("\"shard_num\" should be between 1 and %u", microsharding);
+            tarantoolbox_message_set_microshard(message, num);
+            uint32_t shards = iproto_cluster_get_shard_count(iprotoxs_instance_to_cluster(context->inst->cluster));
+            shard_num = (num % shards) + 1;
+        }
+
+        tbxs_set_message_cluster(message, context->inst->cluster);
+
+        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
+        iproto_message_opts_t *opts = iproto_message_options(imessage);
+        iprotoxs_parse_opts(opts, reqhv);
+        if (shard_num)
+            opts->shard_num = shard_num;
+
+        if (context->callback)
+            opts->callback = tbxs_callback;
+
+        opts->data = context;
+    }
+    return message;
+}
+
+static void tbxs_selected_message_response(tbxs_data_t *context, HV *result) {
+    HV *reqhv = (HV *)SvRV(context->request);
     bool replica;
-    tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(message, &replica);
+    tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(context->message, &replica);
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
     if (replica)
         (void)hv_store(result, "replica", 7, &PL_sv_yes, 0);
 
     uint32_t conf_count;
     tbtupleconf_t *conf_start;
-    tarantoolbox_message_type_t type = tarantoolbox_message_type(message);
+    tarantoolbox_message_type_t type = tarantoolbox_message_type(context->message);
     if (type == EXEC_LUA) {
-        tbfunc_t *func = tbxs_fetch_func(request);
+        tbfunc_t *func = &context->inst->func;
         conf_count = func->out_count;
         conf_start = func->out;
     } else {
-        tbns_t *ns = tbxs_fetch_ns(request);
+        tbns_t *ns = &context->inst->ns;
         conf_count = 1;
         conf_start = &ns->tuple;
     }
 
     SV *tuplessv;
-    SV *hash_by = conf_count == 1 ? tbxs_fetch_hash_by(request, conf_start) : NULL;
+    SV *hash_by = conf_count == 1 ? tbxs_fetch_hash_by(reqhv, conf_start) : NULL;
     if (hash_by) {
         tuplessv = (SV *)newHV();
     } else {
@@ -930,7 +1017,7 @@ void tbxs_selected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV
         av_extend((AV *)tuplessv, ntuples - 1);
     }
 
-    bool want_raw = tbxs_fetch_raw(request);
+    bool want_raw = tbxs_fetch_raw(reqhv);
     uint32_t conf_num = 0;
     for (uint32_t i = 0; i < ntuples; i++) {
         tbtupleconf_t *conf = &conf_start[conf_num];
@@ -961,14 +1048,15 @@ void tbxs_selected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV
         SvREFCNT_dec(tuplesrv);
 }
 
-void tbxs_affected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV *request) {
-    tbns_t *ns = tbxs_fetch_ns(request);
-    tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(message, NULL);
+static void tbxs_affected_message_response(tbxs_data_t *context, HV *result) {
+    tbns_t *ns = &context->inst->ns;
+    HV *reqhv = (HV *)SvRV(context->request);
+    tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(context->message, NULL);
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
     SV *tuplesv;
     if (tarantoolbox_tuples_has_tuples(tuples) && ntuples == 1) {
         AV *tupleav = tbxs_tuple_to_av(tarantoolbox_tuples_get_tuple(tuples, 0), ns->tuple.format);
-        SV *tupleahv = ns->tuple.fields && !tbxs_fetch_raw(request) ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->tuple.fields) : (SV *)tupleav;
+        SV *tupleahv = ns->tuple.fields && !tbxs_fetch_raw(reqhv) ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->tuple.fields) : (SV *)tupleav;
         tuplesv = newRV_noinc(tupleahv);
     } else {
         tuplesv = newSVuv(ntuples);
@@ -977,52 +1065,52 @@ void tbxs_affected_message_to_hv(tarantoolbox_message_t *message, HV *result, HV
         SvREFCNT_dec(tuplesv);
 }
 
-tarantoolbox_message_t *tbxs_hv_to_message(HV *request, SV *errsv) {
-    SV **val = hv_fetch(request, "type", 4, 0);
-    if (!val)
-        croak("\"type\" is required");
-    if (!SvPOK(*val))
-        croak("\"type\" should be a string");
-    tarantoolbox_message_t *message;
-    char *type = SvPV_nolen(*val);
-    if (strcmp(type, "select") == 0) {
-        message = tbxs_select_hv_to_message(request, errsv);
-    } else if (strcmp(type, "insert") == 0) {
-        message = tbxs_insert_hv_to_message(request, errsv);
-    } else if (strcmp(type, "update") == 0) {
-        message = tbxs_update_hv_to_message(request, errsv);
-    } else if (strcmp(type, "delete") == 0) {
-        message = tbxs_delete_hv_to_message(request, errsv);
-    } else if (strcmp(type, "call") == 0) {
-        message = tbxs_call_hv_to_message(request, errsv);
-    } else {
-        croak("unknown message type: \"%s\"", type);
-    }
-    if (message != NULL) {
-        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
-        iproto_message_opts_t *opts = iproto_message_options(imessage);
-        iprotoxs_parse_opts(opts, request);
+static tbxs_data_t *tbxs_context_init(SV *instance, SV *request) {
+    if (!(SvROK(request) && SvTYPE(SvRV(request)) == SVt_PVHV))
+        croak("Message should be a HASHREF");
 
-        tbxs_data_t *optsdata;
-        Newxz(optsdata, 1, tbxs_data_t);
+    tbxs_data_t *context;
+    Newxz(context, 1, tbxs_data_t);
+    context->request = SvREFCNT_inc(request);
+    context->error = newSV(0);
 
-        SV *callback = tbxs_fetch_callback(request);
-        if (callback) {
-            opts->callback = tbxs_callback;
-            optsdata->callback = SvREFCNT_inc(callback);
-            optsdata->message = message;
-            optsdata->request = (HV *)SvREFCNT_inc((SV *)request);
-            optsdata->errsv = errsv;
-        }
+    context->type = tbxs_fetch_type(request);
 
-        opts->data = optsdata;
-    }
-    return message;
+    const char *instkey = context->type == EXEC_LUA ? "function" : "namespace";
+    int instlen = context->type == EXEC_LUA ? 8 : 9;
+
+    SV **val = hv_fetch((HV *)SvRV(request), instkey, instlen, 0);
+    SV *inst = val ? *val : instance;
+    if (!instance) croak("\"%s\" should be specified", instkey);
+    context->instance = SvREFCNT_inc(inst);
+    context->inst = context->type == EXEC_LUA ? tbfunc_inst(inst) : tbns_inst(inst);
+
+    SV *callback = tbxs_fetch_callback(request);
+    if (callback)
+        context->callback = SvREFCNT_inc(callback);
+
+    context->message = tbxs_message_init(context);
+
+    return context;
 }
 
-HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, SV *errsv) {
-    SV **val = hv_fetch(request, "inplace", 7, 0);
-    HV *result = val && SvTRUE(*val) ? (HV *)SvREFCNT_inc((SV *)request) : newHV();
+static void tbxs_context_free(tbxs_data_t *context) {
+    if (context->message)
+        tarantoolbox_message_free(context->message);
+    SvREFCNT_dec(context->instance);
+    SvREFCNT_dec(context->request);
+    if (context->callback)
+        SvREFCNT_dec(context->callback);
+    Safefree(context);
+}
+
+static SV *tbxs_context_response(tbxs_data_t *context) {
+    HV *reqhv = (HV *)SvRV(context->request);
+    SV **val = hv_fetch(reqhv, "inplace", 7, 0);
+    SV *result = val && SvTRUE(*val) ? SvREFCNT_inc(context->request) : newRV_noinc((SV *)newHV());
+    HV *reshv = (HV *)SvRV(result);
+    SV *errsv = context->error;
+    tarantoolbox_message_t * message = context->message;
     if (message) {
         const char *error_string;
         tarantoolbox_error_t error = tarantoolbox_message_error(message, &error_string);
@@ -1035,29 +1123,30 @@ HV *tbxs_message_to_hv(tarantoolbox_message_t *message, HV *request, SV *errsv) 
             switch (type) {
                 case SELECT:
                 case EXEC_LUA:
-                    tbxs_selected_message_to_hv(message, result, request);
+                    tbxs_selected_message_response(context, reshv);
                     break;
                 default:
-                    tbxs_affected_message_to_hv(message, result, request);
+                    tbxs_affected_message_response(context, reshv);
             }
         }
-
-        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
-        tbxs_data_t *optsdata = (tbxs_data_t *)iproto_message_options(imessage)->data;
-        if (optsdata->callback) {
-            SvREFCNT_dec(optsdata->callback);
-            SvREFCNT_dec(optsdata->request);
-        }
-        Safefree(optsdata);
-
-        tarantoolbox_message_free(message);
     } else if (!SvIOK(errsv)) {
         sv_setuv(errsv, ERR_CODE_INVALID_REQUEST);
         SvPOK_on(errsv);
     }
-    if (!hv_store(result, "error", 5, errsv, 0))
+    if (!hv_store(reshv, "error", 5, errsv, 0))
         SvREFCNT_dec(errsv);
     return result;
+}
+
+static SV *tbxs_context_retval(tbxs_data_t *context) {
+    if (context->callback) {
+        if (!context->message)
+            tbxs_context_callback(context);
+        return &PL_sv_undef;
+    }
+    SV *retval = tbxs_context_response(context);
+    tbxs_context_free(context);
+    return retval;
 }
 
 static void tbtupleconf_set_format(tbtupleconf_t *conf, SV *value) {
@@ -1258,74 +1347,36 @@ static void tbfunc_set_out(tbfunc_t *func, SV *format, SV *fields) {
     }
 }
 
-static AV *tbxs_bulk(AV *list, struct timeval *timeout) {
+static AV *tbxs_bulk(SV *instance, AV *list, struct timeval *timeout) {
     I32 listsize = av_len(list) + 1;
-    tarantoolbox_message_t **messages;
-    Newx(messages, listsize, tarantoolbox_message_t *);
-    SV **errors;
-    Newxz(errors, listsize, SV *);
+    tbxs_data_t **contexts;
+    Newx(contexts, listsize, tbxs_data_t *);
+    iproto_message_t **imessages;
+    Newx(imessages, listsize, iproto_message_t *);
     uint32_t nmessages = 0;
     for (I32 i = 0; i < listsize; i++) {
         SV **sv = av_fetch(list, i, 0);
-        if (!(sv && SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVHV))
-            croak("Messages should be a HASHREF");
-        HV *request = (HV *)SvRV(*sv);
-        errors[i] = newSV(0);
-        tarantoolbox_message_t *message = tbxs_hv_to_message(request, errors[i]);
-        if (message) {
-            messages[nmessages++] = message;
-        }
+        tbxs_data_t *context = tbxs_context_init(instance, *sv);
+        if (context->message)
+            imessages[nmessages++] = tarantoolbox_message_get_iproto_message(context->message);
+        contexts[i] = context;
     }
-    iproto_message_t **imessages;
-    Newx(imessages, nmessages, iproto_message_t *);
-    for (uint32_t i = 0; i < nmessages; i++)
-        imessages[i] = tarantoolbox_message_get_iproto_message(messages[i]);
     iproto_bulk(imessages, nmessages, timeout);
     AV *result = newAV();
-    uint32_t j = 0;
-    for (I32 i = 0; i < listsize; i++) {
-        HV *request = (HV *)SvRV(*av_fetch(list, i, 0));
-        HV *response;
-        tarantoolbox_message_t *message = SvOK(errors[i]) ? NULL : messages[j];
-        if (message) {
-            iproto_message_opts_t *iopts = iproto_message_options(imessages[j]);
-            response = iopts->callback ? NULL
-                : tbxs_message_to_hv(message, request, errors[i]);
-            j++;
-        } else {
-            response = tbxs_message_to_hv(message, request, errors[i]);
-            SV *callback = tbxs_fetch_callback(request);
-            if (callback) {
-                tbxs_call_callback(callback, response);
-                response = NULL;
-            }
-        }
-        av_push(result, response ? newRV_noinc((SV *)response) : &PL_sv_undef);
-    }
+    for (I32 i = 0; i < listsize; i++)
+        av_push(result, tbxs_context_retval(contexts[i]));
     Safefree(imessages);
-    Safefree(errors);
-    Safefree(messages);
+    Safefree(contexts);
     return (AV *)sv_2mortal((SV *)result);
 }
 
-static HV *tbxs_do(HV *request, struct timeval *timeout) {
-    SV *error = newSV(0);
-    tarantoolbox_message_t *message = tbxs_hv_to_message(request, error);
-    if (message) {
-        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(message);
+static SV *tbxs_do(SV *instance, SV *request, struct timeval *timeout) {
+    tbxs_data_t *context = tbxs_context_init(instance, request);
+    if (context->message) {
+        iproto_message_t *imessage = tarantoolbox_message_get_iproto_message(context->message);
         iproto_do(imessage, timeout);
-        iproto_message_opts_t *iopts = iproto_message_options(imessage);
-        if (iopts->callback)
-            return NULL;
-    } else {
-        SV *callback = tbxs_fetch_callback(request);
-        if (callback) {
-            tbxs_call_callback(callback, tbxs_message_to_hv(message, request, error));
-            return NULL;
-        }
     }
-    HV *response = tbxs_message_to_hv(message, request, error);
-    return (HV *)sv_2mortal((SV *)response);
+    return tbxs_context_retval(context);
 }
 
 MODULE = MR::Tarantool::Box::XS		PACKAGE = MR::Tarantool::Box::XS		PREFIX = ns_
@@ -1371,8 +1422,8 @@ ns_new(klass, ...)
     CODE:
         if (items % 2 == 0)
             croak("Odd number of elements in hash assignment");
-        tbns_t *ns;
-        Newxz(ns, 1, tbns_t);
+        tbinst_t *self;
+        Newxz(self, 1, tbinst_t);
         bool has_namespace = false;
         AV *indexes = NULL;
         for (int i = 1; i < items; i += 2) {
@@ -1382,30 +1433,34 @@ ns_new(klass, ...)
                 SV *instance = iprotoxs_instance(value);
                 if (!instance)
                     croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
-                ns->cluster = SvREFCNT_inc(instance);
+                self->cluster = SvREFCNT_inc(instance);
+            } else if (strcmp(key, "microsharding") == 0) {
+                if (!(SvIOK(value) || looks_like_number(value)))
+                    croak("\"microsharding\" should be an integer");
+                self->microsharding = SvUV(value);
             } else if (strcmp(key, "namespace") == 0) {
                 if (!(SvIOK(value) || looks_like_number(value)))
                     croak("\"namespace\" should be an integer");
-                ns->namespace = SvUV(value);
+                self->ns.namespace = SvUV(value);
                 has_namespace = true;
             } else if (strcmp(key, "format") == 0) {
-                tbtupleconf_set_format(&ns->tuple, value);
+                tbtupleconf_set_format(&self->ns.tuple, value);
             } else if (strcmp(key, "fields") == 0) {
-                tbtupleconf_set_fields(&ns->tuple, value);
+                tbtupleconf_set_fields(&self->ns.tuple, value);
             } else if (strcmp(key, "indexes") == 0) {
                 if (!(SvROK(value) && SvTYPE(SvRV(value)) == SVt_PVAV))
                     croak("\"indexes\" should be an ARRAYREF");
                 indexes = (AV *)SvRV(value);
             }
         }
-        if (!ns->cluster)
+        if (!self->cluster)
             croak("\"iproto\" is required");
         if (!has_namespace)
             croak("\"namespace\" is required");
         if (indexes)
-            tbns_set_indexes(ns, indexes);
+            tbns_set_indexes(&self->ns, indexes);
         RETVAL = newSV(0);
-        sv_setref_pv(RETVAL, SvPV_nolen(klass), ns);
+        sv_setref_pv(RETVAL, SvPV_nolen(klass), self);
         if (ix == 1) {
             dMY_CXT;
             if (hv_exists_ent(MY_CXT.namespaces, klass, 0))
@@ -1419,19 +1474,19 @@ void
 ns_DESTROY(namespace)
         MR::Tarantool::Box::XS namespace
     CODE:
-        tbns_t *ns = tbxs_extract_ns(namespace);
-        if (!ns) croak("DESTROY should be called as an instance method");
+        tbinst_t *self = tbns_inst(namespace);
+        if (!self) croak("DESTROY should be called as an instance method");
         if (!PL_dirty) {
-            SvREFCNT_dec(ns->cluster);
-            SvREFCNT_dec(ns->tuple.fields);
-            SvREFCNT_dec(ns->tuple.field_id_by_name);
-            SvREFCNT_dec(ns->tuple.format);
-            SvREFCNT_dec(ns->indexes);
-            SvREFCNT_dec(ns->index_id_by_name);
-            SvREFCNT_dec(ns->index_format);
-            SvREFCNT_dec(ns->index_fields);
+            SvREFCNT_dec(self->cluster);
+            SvREFCNT_dec(self->ns.tuple.fields);
+            SvREFCNT_dec(self->ns.tuple.field_id_by_name);
+            SvREFCNT_dec(self->ns.tuple.format);
+            SvREFCNT_dec(self->ns.indexes);
+            SvREFCNT_dec(self->ns.index_id_by_name);
+            SvREFCNT_dec(self->ns.index_format);
+            SvREFCNT_dec(self->ns.index_fields);
         }
-        free(ns);
+        Safefree(self);
 
 MR::Tarantool::Box::XS
 ns_remove_singleton(klass)
@@ -1460,36 +1515,17 @@ ns_bulk(namespace, list, ...)
         AV *list
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        I32 listsize = av_len(list) + 1;
-        if (namespace) {
-            for (I32 i = 0; i < listsize; i++) {
-                SV **sv = av_fetch(list, i, 0);
-                if (!(sv && SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVHV))
-                    croak("Message should be a HASHREF");
-                HV *request = (HV *)SvRV(*sv);
-                sv = hv_fetch(request, "namespace", 9, 1);
-                if (sv && !SvOK(*sv))
-                    sv_setsv(*sv, namespace);
-            }
-        }
-        RETVAL = tbxs_bulk(list, timeout);
+        RETVAL = tbxs_bulk(namespace, list, timeout);
     OUTPUT:
         RETVAL
 
-HV *
+SV *
 ns_do(namespace, request, ...)
         MR::Tarantool::Box::XS namespace
-        HV *request
+        SV *request
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        if (namespace) {
-            SV **sv = hv_fetch(request, "namespace", 9, 1);
-            if (sv && !SvOK(*sv))
-                sv_setsv(*sv, namespace);
-        }
-        RETVAL = tbxs_do(request, timeout);
-        if (RETVAL == NULL)
-            XSRETURN_UNDEF;
+        RETVAL = tbxs_do(namespace, request, timeout);
     OUTPUT:
         RETVAL
 
@@ -1497,10 +1533,10 @@ MR::IProto::XS
 ns_iproto(namespace)
         MR::Tarantool::Box::XS namespace
     CODE:
-        tbns_t *ns = tbxs_extract_ns(namespace);
-        if (!ns)
+        tbinst_t *self = tbns_inst(namespace);
+        if (!self)
             croak("iproto() should be called as an instance or a singleton method");
-        RETVAL = SvREFCNT_inc(ns->cluster);
+        RETVAL = SvREFCNT_inc(self->cluster);
     OUTPUT:
         RETVAL
 
@@ -1515,8 +1551,9 @@ fn_new(klass, ...)
     CODE:
         if (items % 2 == 0)
             croak("Odd number of elements in hash assignment");
-        tbfunc_t *func;
-        Newxz(func, 1, tbfunc_t);
+        tbinst_t *self;
+        Newxz(self, 1, tbinst_t);
+        self->is_func = true;
         SV *out_format = NULL;
         SV *out_fields = NULL;
         for (int i = 1; i < items; i += 2) {
@@ -1526,28 +1563,32 @@ fn_new(klass, ...)
                 SV *instance = iprotoxs_instance(value);
                 if (!instance)
                     croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
-                func->cluster = SvREFCNT_inc(instance);
+                self->cluster = SvREFCNT_inc(instance);
+            } else if (strcmp(key, "microsharding") == 0) {
+                if (!(SvIOK(value) || looks_like_number(value)))
+                    croak("\"microsharding\" should be an integer");
+                self->microsharding = SvUV(value);
             } else if (strcmp(key, "name") == 0) {
                 if (!SvPOK(value))
                     croak("\"name\" should be a string");
-                func->name = strdup(SvPV_nolen(value));
+                self->func.name = savepv(SvPV_nolen(value));
             } else if (strcmp(key, "in_format") == 0) {
-                tbtupleconf_set_format(&func->in, value);
+                tbtupleconf_set_format(&self->func.in, value);
             } else if (strcmp(key, "in_fields") == 0) {
-                tbtupleconf_set_fields(&func->in, value);
+                tbtupleconf_set_fields(&self->func.in, value);
             } else if (strcmp(key, "out_format") == 0) {
                 out_format = value;
             } else if (strcmp(key, "out_fields") == 0) {
                 out_fields = value;
             }
         }
-        if (!func->cluster)
+        if (!self->cluster)
             croak("\"iproto\" is required");
-        if (!func->name)
+        if (!self->func.name)
             croak("\"name\" is required");
-        tbfunc_set_out(func, out_format, out_fields);
+        tbfunc_set_out(&self->func, out_format, out_fields);
         RETVAL = newSV(0);
-        sv_setref_pv(RETVAL, SvPV_nolen(klass), func);
+        sv_setref_pv(RETVAL, SvPV_nolen(klass), self);
         if (ix == 1) {
             dMY_CXT;
             if (hv_exists_ent(MY_CXT.functions, klass, 0)) // FIXME not klass, but caller::method
@@ -1561,23 +1602,23 @@ void
 fn_DESTROY(function)
         MR::Tarantool::Box::XS::Function function
     CODE:
-        tbfunc_t *func = tbxs_extract_func(function);
-        if (!func)
+        tbinst_t *self = tbfunc_inst(function);
+        if (!self)
             croak("DESTROY should be called as an instance method");
         if (!PL_dirty) {
-            SvREFCNT_dec(func->cluster);
-            SvREFCNT_dec(func->in.fields);
-            SvREFCNT_dec(func->in.field_id_by_name);
-            SvREFCNT_dec(func->in.format);
-            for (uint32_t i = 0; i < func->out_count; i++) {
-                SvREFCNT_dec(func->out[i].fields);
-                SvREFCNT_dec(func->out[i].field_id_by_name);
-                SvREFCNT_dec(func->out[i].format);
+            SvREFCNT_dec(self->cluster);
+            SvREFCNT_dec(self->func.in.fields);
+            SvREFCNT_dec(self->func.in.field_id_by_name);
+            SvREFCNT_dec(self->func.in.format);
+            for (uint32_t i = 0; i < self->func.out_count; i++) {
+                SvREFCNT_dec(self->func.out[i].fields);
+                SvREFCNT_dec(self->func.out[i].field_id_by_name);
+                SvREFCNT_dec(self->func.out[i].format);
             }
         }
-        free(func->name);
-        free(func->out);
-        free(func);
+        Safefree(self->func.name);
+        Safefree(self->func.out);
+        Safefree(self);
 
 MR::Tarantool::Box::XS::Function
 fn_remove_singleton(klass)
@@ -1606,36 +1647,17 @@ fn_bulk(function, list, ...)
         AV *list
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        I32 listsize = av_len(list) + 1;
-        if (function) {
-            for (I32 i = 0; i < listsize; i++) {
-                SV **sv = av_fetch(list, i, 0);
-                if (!(sv && SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVHV))
-                    croak("Messages should be a HASHREF");
-                HV *request = (HV *)SvRV(*sv);
-                sv = hv_fetch(request, "function", 8, 1);
-                if (sv && !SvOK(*sv))
-                    sv_setsv(*sv, function);
-            }
-        }
-        RETVAL = tbxs_bulk(list, timeout);
+        RETVAL = tbxs_bulk(function, list, timeout);
     OUTPUT:
         RETVAL
 
-HV *
+SV *
 fn_do(function, request, ...)
         MR::Tarantool::Box::XS::Function function
-        HV *request
+        SV *request
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        if (function) {
-            SV **sv = hv_fetch(request, "function", 8, 1);
-            if (sv && !SvOK(*sv))
-                sv_setsv(*sv, function);
-        }
-        RETVAL = tbxs_do(request, timeout);
-        if (RETVAL == NULL)
-            XSRETURN_UNDEF;
+        RETVAL = tbxs_do(function, request, timeout);
     OUTPUT:
         RETVAL
 
@@ -1643,9 +1665,9 @@ MR::IProto::XS
 fn_iproto(function)
         MR::Tarantool::Box::XS::Function function
     CODE:
-        tbfunc_t *func = tbxs_extract_func(function);
-        if (!func)
+        tbinst_t *self = tbfunc_inst(function);
+        if (!self)
             croak("iproto() should be called as an instance or a singleton method");
-        RETVAL = SvREFCNT_inc(func->cluster);
+        RETVAL = SvREFCNT_inc(self->cluster);
     OUTPUT:
         RETVAL
