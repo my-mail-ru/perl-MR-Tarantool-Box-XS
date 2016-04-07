@@ -13,6 +13,36 @@
 #include <iprotoxs.h>
 #include <assert.h>
 
+#define SHARED_KEYS(_) \
+        _(_flags) \
+        _(action) \
+        _(callback) \
+        _(error) \
+        _(extra_fields) \
+        _(function) \
+        _(hash_by) \
+        _(inplace) \
+        _(key) \
+        _(keys) \
+        _(limit) \
+        _(namespace) \
+        _(offset) \
+        _(ops) \
+        _(raw) \
+        _(replica) \
+        _(shard_num) \
+        _(tuple) \
+        _(tuples) \
+        _(type) \
+        _(use_index) \
+        _(want_result)
+
+#define SHARED_KEYS_STRUCT_DEF(k) SV *k;
+#define SHARED_KEYS_STRUCT struct { SHARED_KEYS(SHARED_KEYS_STRUCT_DEF) }
+
+#define SHARED_KEYS_INIT_DEF(k) MY_CXT.keys.k = newSVpvs_share(#k);
+#define SHARED_KEYS_INIT SHARED_KEYS(SHARED_KEYS_INIT_DEF)
+
 #define MY_CXT_KEY "MR::Tarantool::Box::XS::_guts" XS_VERSION
 
 typedef struct {
@@ -21,6 +51,7 @@ typedef struct {
 #ifdef WITH_CP1251
     SV *cp1251;
 #endif
+    SHARED_KEYS_STRUCT keys;
 } my_cxt_t;
 
 START_MY_CXT;
@@ -295,7 +326,7 @@ static void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv, b
 }
 
 // TODO check data size
-SV *tbxs_field_to_sv(char format, void *data, size_t size) {
+static SV *tbxs_field_to_sv(char format, void *data, size_t size) {
     SV *sv;
     switch (format) {
 #ifdef WITH_MATH_INT64
@@ -359,7 +390,7 @@ SV *tbxs_field_to_sv(char format, void *data, size_t size) {
     return sv;
 }
 
-tarantoolbox_tuple_t *tbxs_av_to_tuple(AV *av, SV *formatsv, SV *errsv) {
+static tarantoolbox_tuple_t *tbxs_av_to_tuple(AV *av, SV *formatsv, SV *errsv) {
     STRLEN formatlen;
     char *format = formatsv ? SvPV(formatsv, formatlen) : NULL;
     tarantoolbox_tuple_t *tuple = tarantoolbox_tuple_init(av_len(av) + 1);
@@ -382,15 +413,17 @@ tarantoolbox_tuple_t *tbxs_av_to_tuple(AV *av, SV *formatsv, SV *errsv) {
     return tuple;
 }
 
-tarantoolbox_tuple_t *tbxs_hv_to_tuple(HV *hv, AV *fields, SV *format, SV *errsv) {
+static tarantoolbox_tuple_t *tbxs_hv_to_tuple(HV *hv, AV *fields, SV *format, SV *errsv) {
+    dMY_CXT;
     I32 size = av_len(fields) + 1;
 
     AV *extra_fields = NULL;
-    SV **val = hv_fetch(hv, "extra_fields", 12, 0);
-    if (val) {
-        if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV))
+    HE *he = hv_fetch_ent(hv, MY_CXT.keys.extra_fields, 0, 0);
+    if (he) {
+        SV *val = HeVAL(he);
+        if (!(SvROK(val) && SvTYPE(SvRV(val)) == SVt_PVAV))
             croak("\"extra_fields\" should be an ARRAYREF");
-        extra_fields = (AV *)SvRV(*val);
+        extra_fields = (AV *)SvRV(val);
         size += av_len(extra_fields) + 1;
     }
 
@@ -400,24 +433,22 @@ tarantoolbox_tuple_t *tbxs_hv_to_tuple(HV *hv, AV *fields, SV *format, SV *errsv
 
     I32 i;
     for (i = 0; i <= av_len(fields); i++) {
-        val = av_fetch(fields, i, 0);
-        STRLEN keylen;
-        char *key = SvPV(*val, keylen);
-        val = hv_fetch(hv, key, keylen, 0);
-        if (!val)
-            croak("\"%s\" is missed in tuple", key);
-        (void)av_store(av, i, SvREFCNT_inc(*val));
+        SV **val = av_fetch(fields, i, 0);
+        HE *he = hv_fetch_ent(hv, *val, 0, 0);
+        if (!he)
+            croak("\"%s\" is missed in tuple", SvPV_nolen(*val));
+        (void)av_store(av, i, SvREFCNT_inc(HeVAL(he)));
     }
     if (extra_fields) {
         for (I32 j = 0; j <= av_len(extra_fields); j++, i++) {
-            val = av_fetch(extra_fields, j, 0);
+            SV **val = av_fetch(extra_fields, j, 0);
             (void)av_store(av, i, SvREFCNT_inc(*val));
         }
     }
     return tbxs_av_to_tuple(av, format, errsv);
 }
 
-tarantoolbox_tuple_t *tbxs_sv_to_tuple(SV *sv, tbtupleconf_t *conf, SV *errsv) {
+static tarantoolbox_tuple_t *tbxs_sv_to_tuple(SV *sv, tbtupleconf_t *conf, SV *errsv) {
     if (SvROK(sv) && SvTYPE(SvRV(sv)) == SVt_PVHV) {
         if (!conf->fields)
             croak("\"fields\" in namespace should be defined");
@@ -429,7 +460,7 @@ tarantoolbox_tuple_t *tbxs_sv_to_tuple(SV *sv, tbtupleconf_t *conf, SV *errsv) {
     }
 }
 
-AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv) {
+static AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv) {
     STRLEN formatlen;
     char *format = formatsv ? SvPV(formatsv, formatlen) : NULL;
     AV *tupleav = newAV();
@@ -449,7 +480,8 @@ AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv) {
     return tupleav;
 }
 
-HV *tbxs_tuple_av_to_hv(AV *tupleav, AV *fields) {
+static HV *tbxs_tuple_av_to_hv(AV *tupleav, AV *fields) {
+    dMY_CXT;
     HV *tuplehv = newHV();
     SV **val;
     I32 j;
@@ -462,13 +494,13 @@ HV *tbxs_tuple_av_to_hv(AV *tupleav, AV *fields) {
     if (j <= av_len(tupleav)) {
         val = av_fetch(tupleav, j, 0);
         AV *extra = av_make(av_len(tupleav) - j + 1, val);
-        (void)hv_store(tuplehv, "extra_fields", 12, newRV_noinc((SV *)extra), 0);
+        (void)hv_store_ent(tuplehv, MY_CXT.keys.extra_fields, newRV_noinc((SV *)extra), 0);
     }
     sv_2mortal((SV *)tupleav);
     return tuplehv;
 }
 
-tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *errsv) {
+static tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *errsv) {
     SV **val = av_fetch(ns->index_format, index, 0);
     if (!val) croak("invalid index %u", index);
     SV *format = *val;
@@ -495,7 +527,7 @@ tarantoolbox_tuple_t *tbxs_sv_to_key(uint32_t index, SV *sv, tbns_t *ns, SV *err
     return NULL;
 }
 
-tarantoolbox_tuples_t *tbxs_av_to_keys(uint32_t index, AV *av, tbns_t *ns, SV *errsv) {
+static tarantoolbox_tuples_t *tbxs_av_to_keys(uint32_t index, AV *av, tbns_t *ns, SV *errsv) {
     tarantoolbox_tuples_t *tuples = tarantoolbox_tuples_init(av_len(av) + 1, true);
     for (I32 i = 0; i <= av_len(av); i++) {
         SV **val = av_fetch(av, i, 0);
@@ -556,13 +588,14 @@ static tbinst_t *tbfunc_inst(SV *sv) {
 }
 
 static tarantoolbox_message_type_t tbxs_fetch_type(SV *request) {
+    dMY_CXT;
     HV *reqhv = (HV *)SvRV(request);
-    SV **val = hv_fetch(reqhv, "type", 4, 0);
-    if (!val)
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.type, 0, 0);
+    if (!he)
         croak("\"type\" is required");
-    if (!SvPOK(*val))
+    if (!SvPOK(HeVAL(he)))
         croak("\"type\" should be a string");
-    char *name = SvPV_nolen(*val);
+    char *name = SvPV_nolen(HeVAL(he));
     tarantoolbox_message_type_t type;
     if (strcmp(name, "select") == 0) {
         type = SELECT;
@@ -580,49 +613,54 @@ static tarantoolbox_message_type_t tbxs_fetch_type(SV *request) {
     return type;
 }
 
-tarantoolbox_tuple_t *tbxs_fetch_key(HV *request, tbns_t *ns, SV *errsv) {
-    SV **val = hv_fetch(request, "key", 3, 0);
-    if (!val) croak("\"key\" is required");
-    return tbxs_sv_to_key(0, *val, ns, errsv);
+static tarantoolbox_tuple_t *tbxs_fetch_key(HV *reqhv, tbns_t *ns, SV *errsv) {
+    dMY_CXT;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.key, 0, 0);
+    if (!he) croak("\"key\" is required");
+    return tbxs_sv_to_key(0, HeVAL(he), ns, errsv);
 }
 
-uint32_t tbxs_fetch_want_result(HV *request) {
-    SV **val = hv_fetch(request, "want_result", 11, 0);
-    return (val && SvTRUE(*val)) ? WANT_RESULT : 0;
+static uint32_t tbxs_fetch_want_result(HV *reqhv) {
+    dMY_CXT;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.want_result, 0, 0);
+    return (he && SvTRUE(HeVAL(he))) ? WANT_RESULT : 0;
 }
 
-bool tbxs_fetch_raw(HV *request) {
-    SV **val = hv_fetch(request, "raw", 3, 0);
-    return val ? SvTRUE(*val) : false;
+static bool tbxs_fetch_raw(HV *reqhv) {
+    dMY_CXT;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.raw, 0, 0);
+    return he ? SvTRUE(HeVAL(he)) : false;
 }
 
-static SV *tbxs_fetch_hash_by(HV *request, tbtupleconf_t *conf) {
-    SV **val = hv_fetch(request, "hash_by", 7, 0);
-    if (val) {
-        if (SvPOK(*val)) {
-            HE *he = hv_fetch_ent(conf->field_id_by_name, *val, 0, 0);
-            if (!he) croak("no such field: \"%s\"", SvPV_nolen(*val));
-            return HeVAL(he);
-        } else if (SvIOK(*val)) {
-            if (SvIV(*val) > av_len(conf->fields))
-                croak("field %"IVdf" is out of range", SvIV(*val));
-            return *val;
-        } else {
-            croak("\"hash_by\" should be a string or an integer");
-        }
+static SV *tbxs_fetch_hash_by(HV *reqhv, tbtupleconf_t *conf) {
+    dMY_CXT;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.hash_by, 0, 0);
+    if (!he)
+        return NULL;
+    SV *val = HeVAL(he);
+    if (SvPOK(val)) {
+        HE *he = hv_fetch_ent(conf->field_id_by_name, val, 0, 0);
+        if (!he) croak("no such field: \"%s\"", SvPV_nolen(val));
+        return HeVAL(he);
+    } else if (SvIOK(val)) {
+        if (SvIV(val) > av_len(conf->fields))
+            croak("field %"IVdf" is out of range", SvIV(val));
+        return val;
+    } else {
+        croak("\"hash_by\" should be a string or an integer");
     }
-    return NULL;
 }
 
 static SV *tbxs_fetch_callback(SV *request) {
+    dMY_CXT;
     HV *reqhv = (HV *)SvRV(request);
-    SV **val = hv_fetch(reqhv, "callback", 8, 0);
-    if (val) {
-        if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
-            croak("\"callback\" should be a CODEREF");
-        return *val;
-    }
-    return NULL;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.callback, 0, 0);
+    if (!he)
+        return NULL;
+    SV *val = HeVAL(he);
+    if (!(SvROK(val) || SvTYPE(SvRV(val)) == SVt_PVCV))
+        croak("\"callback\" should be a CODEREF");
+    return val;
 }
 
 static void tbxs_set_message_cluster(tarantoolbox_message_t *message, SV *clustersv) {
@@ -632,21 +670,21 @@ static void tbxs_set_message_cluster(tarantoolbox_message_t *message, SV *cluste
 }
 
 static tarantoolbox_message_t *tbxs_select_message_init(tbxs_data_t *context) {
+    dMY_CXT;
     tbns_t *ns = &context->inst->ns;
-    HV *request = (HV *)SvRV(context->request);
+    HV *reqhv = (HV *)SvRV(context->request);
 
-    SV **val;
+    HE *he;
     uint32_t index;
-    if ((val = hv_fetch(request, "use_index", 9, 0))) {
-        if (SvIOK(*val)) {
-            index = SvUV(*val);
-        } else if (SvPOK(*val)) {
-            STRLEN namelen;
-            char *name = SvPV(*val, namelen);
-            val = hv_fetch(ns->index_id_by_name, name, namelen, 0);
-            if (!val)
-                croak("no such index: \"%s\"", name);
-            index = SvUV(*val);
+    if ((he = hv_fetch_ent(reqhv, MY_CXT.keys.use_index, 0, 0))) {
+        SV *val = HeVAL(he);
+        if (SvIOK(val)) {
+            index = SvUV(val);
+        } else if (SvPOK(val)) {
+            HE *he = hv_fetch_ent(ns->index_id_by_name, val, 0, 0);
+            if (!he)
+                croak("no such index: \"%s\"", SvPV_nolen(val));
+            index = SvUV(HeVAL(he));
         } else {
             croak("\"use_index\" shouls be a string or an integer");
         }
@@ -657,28 +695,32 @@ static tarantoolbox_message_t *tbxs_select_message_init(tbxs_data_t *context) {
     }
 
     uint32_t offset = 0;
-    if ((val = hv_fetch(request, "offset", 6, 0))) {
-        if (!(SvIOK(*val) || looks_like_number(*val)))
+    if ((he = hv_fetch_ent(reqhv, MY_CXT.keys.offset, 0, 0))) {
+        SV *val = HeVAL(he);
+        if (!(SvIOK(val) || looks_like_number(val)))
             croak("\"offset\" should be an integer");
-        offset = SvUV(*val);
+        offset = SvUV(val);
     }
 
     uint32_t limit = 0;
-    if ((val = hv_fetch(request, "limit", 5, 0))) {
-        if (!SvOK(*val))
+    if ((he = hv_fetch_ent(reqhv, MY_CXT.keys.limit, 0, 0))) {
+        SV *val = HeVAL(he);
+        if (!SvOK(val))
             limit = UINT32_MAX;
-        else if (SvIOK(*val) || looks_like_number(*val))
-            limit = SvUV(*val);
+        else if (SvIOK(val) || looks_like_number(val))
+            limit = SvUV(val);
         else
             croak("\"limit\" should be an integer");
     }
 
-    val = hv_fetch(request, "keys", 4, 0);
-    if (!val) croak("\"keys\" should be specified");
-    if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV)) croak("\"keys\" should be an ARRAYREF");
-    AV *keysav = (AV *)SvRV(*val);
+    he = hv_fetch_ent(reqhv, MY_CXT.keys.keys, 0, 0);
+    if (!he)
+        croak("\"keys\" should be specified");
+    if (!(SvROK(HeVAL(he)) && SvTYPE(SvRV(HeVAL(he))) == SVt_PVAV))
+        croak("\"keys\" should be an ARRAYREF");
+    AV *keysav = (AV *)SvRV(HeVAL(he));
     if (av_len(keysav) == -1) croak("\"keys\" should be non-empty");
-    val = av_fetch(keysav, 0, 0);
+    SV **val = av_fetch(keysav, 0, 0);
     int nfields;
     if (SvFieldOK(*val)) {
         nfields = 1;
@@ -696,18 +738,20 @@ static tarantoolbox_message_t *tbxs_select_message_init(tbxs_data_t *context) {
 }
 
 static tarantoolbox_message_t *tbxs_insert_message_init(tbxs_data_t * context) {
+    dMY_CXT;
     tbns_t *ns = &context->inst->ns;
-    HV *request = (HV *)SvRV(context->request);
+    HV *reqhv = (HV *)SvRV(context->request);
 
-    SV **val = hv_fetch(request, "tuple", 5, 0);
-    if (!val) croak("\"tuple\" is required");
-    SV *tuplesv = *val;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.tuple, 0, 0);
+    if (!he)
+        croak("\"tuple\" is required");
+    SV *tuplesv = HeVAL(he);
 
-    uint32_t flags = tbxs_fetch_want_result(request);
-    if ((val = hv_fetch(request, "action", 6, 0))) {
-        if (!SvPOK(*val))
+    uint32_t flags = tbxs_fetch_want_result(reqhv);
+    if ((he = hv_fetch_ent(reqhv, MY_CXT.keys.action, 0, 0))) {
+        if (!SvPOK(HeVAL(he)))
             croak("\"action\" should be a string");
-        char *action = SvPV_nolen(*val);
+        char *action = SvPV_nolen(HeVAL(he));
         if (strcmp(action, "add") == 0) {
             flags |= INSERT_ADD;
         } else if (strcmp(action, "replace") == 0) {
@@ -724,16 +768,17 @@ static tarantoolbox_message_t *tbxs_insert_message_init(tbxs_data_t * context) {
     return message;
 }
 
-tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *conf, SV *errsv) {
-    SV **val = hv_fetch(request, "ops", 3, 0);
-    if (!val)
+static tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *reqhv, tbtupleconf_t *conf, SV *errsv) {
+    dMY_CXT;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.ops, 0, 0);
+    if (!he)
         croak("\"ops\" are required");
-    if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV))
+    if (!(SvROK(HeVAL(he)) && SvTYPE(SvRV(HeVAL(he))) == SVt_PVAV))
         croak("\"ops\" should be an ARRAYREF");
-    AV *av = (AV *)SvRV(*val);
+    AV *av = (AV *)SvRV(HeVAL(he));
     tarantoolbox_update_ops_t *ops = tarantoolbox_update_ops_init(av_len(av) + 1);
     for (I32 i = 0; i <= av_len(av); i++) {
-        val = av_fetch(av, i, 0);
+        SV **val = av_fetch(av, i, 0);
         if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV))
             croak("each op should be an ARRAYREF");
         AV *opav = (AV *)SvRV(*val);
@@ -882,20 +927,21 @@ tarantoolbox_update_ops_t *tbxs_fetch_update_ops(HV *request, tbtupleconf_t *con
 }
 
 static tarantoolbox_message_t *tbxs_update_message_init(tbxs_data_t *context) {
+    dMY_CXT;
     tbns_t *ns = &context->inst->ns;
-    HV *request = (HV *)SvRV(context->request);
+    HV *reqhv = (HV *)SvRV(context->request);
 
-    uint32_t flags = tbxs_fetch_want_result(request);
-    SV **val;
-    if ((val = hv_fetch(request, "_flags", 6, 0))) {
-        if (!SvIOK(*val))
+    uint32_t flags = tbxs_fetch_want_result(reqhv);
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys._flags, 0, 0);
+    if (he) {
+        if (!SvIOK(HeVAL(he)))
             croak("\"_flags\" should be an integer");
-        flags |= SvUV(*val);
+        flags |= SvUV(HeVAL(he));
     }
     tarantoolbox_message_t *message = NULL;
-    tarantoolbox_update_ops_t *ops = tbxs_fetch_update_ops(request, &ns->tuple, context->error);
+    tarantoolbox_update_ops_t *ops = tbxs_fetch_update_ops(reqhv, &ns->tuple, context->error);
     if (ops) {
-        tarantoolbox_tuple_t *key = tbxs_fetch_key(request, ns, context->error);
+        tarantoolbox_tuple_t *key = tbxs_fetch_key(reqhv, ns, context->error);
         if (key) {
             message = tarantoolbox_update_init(ns->namespace, key, ops, flags);
             tarantoolbox_tuple_free(key);
@@ -917,12 +963,14 @@ static tarantoolbox_message_t *tbxs_delete_message_init(tbxs_data_t *context) {
 }
 
 static tarantoolbox_message_t *tbxs_call_message_init(tbxs_data_t *context) {
+    dMY_CXT;
     tbfunc_t *func = &context->inst->func;
-    HV *request = (HV *)SvRV(context->request);
+    HV *reqhv = (HV *)SvRV(context->request);
 
-    SV **val = hv_fetch(request, "tuple", 5, 0);
-    if (!val) croak("\"tuple\" is required");
-    SV *tuplesv = *val;
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.tuple, 0, 0);
+    if (!he)
+        croak("\"tuple\" is required");
+    SV *tuplesv = HeVAL(he);
 
     tarantoolbox_tuple_t *tuple = tbxs_sv_to_tuple(tuplesv, &func->in, context->error);
     if (tuple == NULL) return NULL;
@@ -932,6 +980,7 @@ static tarantoolbox_message_t *tbxs_call_message_init(tbxs_data_t *context) {
 }
 
 static tarantoolbox_message_t *tbxs_message_init(tbxs_data_t *context) {
+    dMY_CXT;
     tarantoolbox_message_t *message;
     switch (context->type) {
         case SELECT:
@@ -958,12 +1007,13 @@ static tarantoolbox_message_t *tbxs_message_init(tbxs_data_t *context) {
         unsigned shard_num = 0;
         uint16_t microsharding = context->inst->microsharding;
         if (microsharding) {
-            SV **val = hv_fetch(reqhv, "shard_num", 9, 0);
-            if (!val)
+            HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.shard_num, 0, 0);
+            if (!he)
                 croak("\"shard_num\" should exist if microsharding is used");
-            if (!(SvIOK(*val) || looks_like_number(*val)))
-                croak("Invalid \"shard_num\" value: \"%s\"", SvPV_nolen(*val));
-            UV num = SvUV(*val);
+            SV *val = HeVAL(he);
+            if (!(SvIOK(val) || looks_like_number(val)))
+                croak("Invalid \"shard_num\" value: \"%s\"", SvPV_nolen(val));
+            UV num = SvUV(val);
             if (num < 1 || num > microsharding)
                 croak("\"shard_num\" should be between 1 and %u", microsharding);
             tarantoolbox_message_set_microshard(message, num);
@@ -988,12 +1038,13 @@ static tarantoolbox_message_t *tbxs_message_init(tbxs_data_t *context) {
 }
 
 static void tbxs_selected_message_response(tbxs_data_t *context, HV *result) {
+    dMY_CXT;
     HV *reqhv = (HV *)SvRV(context->request);
     bool replica;
     tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(context->message, &replica);
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
     if (replica)
-        (void)hv_store(result, "replica", 7, &PL_sv_yes, 0);
+        (void)hv_store_ent(result, MY_CXT.keys.replica, &PL_sv_yes, 0);
 
     uint32_t conf_count;
     tbtupleconf_t *conf_start;
@@ -1044,11 +1095,12 @@ static void tbxs_selected_message_response(tbxs_data_t *context, HV *result) {
             conf_num++;
     }
     SV *tuplesrv = newRV_noinc(tuplessv);
-    if (!hv_store(result, "tuples", 6, tuplesrv, 0))
+    if (!hv_store_ent(result, MY_CXT.keys.tuples, tuplesrv, 0))
         SvREFCNT_dec(tuplesrv);
 }
 
 static void tbxs_affected_message_response(tbxs_data_t *context, HV *result) {
+    dMY_CXT;
     tbns_t *ns = &context->inst->ns;
     HV *reqhv = (HV *)SvRV(context->request);
     tarantoolbox_tuples_t *tuples = tarantoolbox_message_response(context->message, NULL);
@@ -1061,11 +1113,12 @@ static void tbxs_affected_message_response(tbxs_data_t *context, HV *result) {
     } else {
         tuplesv = newSVuv(ntuples);
     }
-    if (!hv_store(result, "tuple", 5, tuplesv, 0))
+    if (!hv_store_ent(result, MY_CXT.keys.tuple, tuplesv, 0))
         SvREFCNT_dec(tuplesv);
 }
 
 static tbxs_data_t *tbxs_context_init(SV *instance, SV *request) {
+    dMY_CXT;
     if (!(SvROK(request) && SvTYPE(SvRV(request)) == SVt_PVHV))
         croak("Message should be a HASHREF");
 
@@ -1076,12 +1129,10 @@ static tbxs_data_t *tbxs_context_init(SV *instance, SV *request) {
 
     context->type = tbxs_fetch_type(request);
 
-    const char *instkey = context->type == EXEC_LUA ? "function" : "namespace";
-    int instlen = context->type == EXEC_LUA ? 8 : 9;
-
-    SV **val = hv_fetch((HV *)SvRV(request), instkey, instlen, 0);
-    SV *inst = val ? *val : instance;
-    if (!instance) croak("\"%s\" should be specified", instkey);
+    SV *key = context->type == EXEC_LUA ? MY_CXT.keys.function : MY_CXT.keys.namespace;
+    HE *he = hv_fetch_ent((HV *)SvRV(request), key, 0, 0);
+    SV *inst = he ? HeVAL(he) : instance;
+    if (!instance) croak("\"%s\" should be specified", SvPV_nolen(key));
     context->instance = SvREFCNT_inc(inst);
     context->inst = context->type == EXEC_LUA ? tbfunc_inst(inst) : tbns_inst(inst);
 
@@ -1105,9 +1156,10 @@ static void tbxs_context_free(tbxs_data_t *context) {
 }
 
 static SV *tbxs_context_response(tbxs_data_t *context) {
+    dMY_CXT;
     HV *reqhv = (HV *)SvRV(context->request);
-    SV **val = hv_fetch(reqhv, "inplace", 7, 0);
-    SV *result = val && SvTRUE(*val) ? SvREFCNT_inc(context->request) : newRV_noinc((SV *)newHV());
+    HE *he = hv_fetch_ent(reqhv, MY_CXT.keys.inplace, 0, 0);
+    SV *result = he && SvTRUE(HeVAL(he)) ? SvREFCNT_inc(context->request) : newRV_noinc((SV *)newHV());
     HV *reshv = (HV *)SvRV(result);
     SV *errsv = context->error;
     tarantoolbox_message_t * message = context->message;
@@ -1133,7 +1185,7 @@ static SV *tbxs_context_response(tbxs_data_t *context) {
         sv_setuv(errsv, ERR_CODE_INVALID_REQUEST);
         SvPOK_on(errsv);
     }
-    if (!hv_store(reshv, "error", 5, errsv, 0))
+    if (!hv_store_ent(reshv, MY_CXT.keys.error, errsv, 0))
         SvREFCNT_dec(errsv);
     return result;
 }
@@ -1178,7 +1230,8 @@ static void tbtupleconf_set_fields(tbtupleconf_t *conf, SV *value) {
         return;
     else if (!(SvROK(value) && SvTYPE(SvRV(value)) == SVt_PVAV))
         croak("\"fields\" should be an ARRAYREF");
-    AV *fields = (AV *)SvREFCNT_inc(SvRV(value));
+    AV *fields = (AV *)SvRV(value);
+    AV *fields_shared = newAV();
     HV *field_id_by_name = newHV();
     for (I32 j = 0; j <= av_len(fields); j++) {
         SV **val = av_fetch(fields, j, 0);
@@ -1186,15 +1239,17 @@ static void tbtupleconf_set_fields(tbtupleconf_t *conf, SV *value) {
             croak("field's name should be a string");
         STRLEN namelen;
         char *name = SvPV(*val, namelen);
-        if (hv_exists(field_id_by_name, name, namelen))
+        SV *namesv = newSVpvn_share(name, namelen, 0);
+        (void)av_store(fields_shared, j, namesv);
+        if (hv_exists_ent(field_id_by_name, namesv, 0))
             croak("field's name should be unique");
-        (void)hv_store(field_id_by_name, name, namelen, newSViv(j), 0);
+        (void)hv_store_ent(field_id_by_name, namesv, newSViv(j), 0);
     }
-    conf->fields = fields;
+    conf->fields = fields_shared;
     conf->field_id_by_name = field_id_by_name;
 }
 
-void tbns_set_indexes(tbns_t *ns, AV *indexes) {
+static void tbns_set_indexes(tbns_t *ns, AV *indexes) {
     ns->indexes = newAV();
     av_extend(ns->indexes, av_len(indexes));
     ns->index_id_by_name = newHV();
@@ -1213,17 +1268,16 @@ void tbns_set_indexes(tbns_t *ns, AV *indexes) {
             croak("each index should be a HASHREF");
         HV *index = (HV *)SvRV(*val);
 
-        val = hv_fetch(index, "name", 4, 0);
+        val = hv_fetchs(index, "name", 0);
         if (!val)
             croak("index should contain a \"name\"");
         if (!SvPOK(*val))
             croak("index's \"name\" should be a string");
-        STRLEN namelen;
-        char *name = SvPV(*val, namelen);
-        if (hv_exists(ns->index_id_by_name, name, namelen))
+        SV *namesv = *val;
+        if (hv_exists_ent(ns->index_id_by_name, namesv, 0))
             croak("index's \"name\" should be unique");
 
-        val = hv_fetch(index, "keys", 4, 0);
+        val = hv_fetchs(index, "keys", 0);
         if (!val)
             croak("index should contain \"keys\"");
         if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVAV))
@@ -1239,21 +1293,19 @@ void tbns_set_indexes(tbns_t *ns, AV *indexes) {
             } else if (SvPOK(*val)) {
                 if (ns->tuple.field_id_by_name == NULL)
                     croak("\"fields\" are required if you use names instead of ids in \"indexes\"");
-                STRLEN namelen;
-                char *name = SvPV(*val, namelen);
-                val = hv_fetch(ns->tuple.field_id_by_name, name, namelen, 0);
-                if (!val)
-                    croak("no \"%s\" in \"fields\"", name);
-                (void)av_store(idkeys, j, SvREFCNT_inc(*val));
+                HE *he = hv_fetch_ent(ns->tuple.field_id_by_name, *val, 0, 0);
+                if (!he)
+                    croak("no \"%s\" in \"fields\"", SvPV_nolen(*val));
+                (void)av_store(idkeys, j, SvREFCNT_inc(HeVAL(he)));
             } else {
                 croak("each key should be a string or an integer");
             }
         }
 
         (void)av_store(ns->indexes, i, newRV_noinc((SV *)idkeys));
-        (void)hv_store(ns->index_id_by_name, name, namelen, newSVuv(i), 0);
+        (void)hv_store_ent(ns->index_id_by_name, namesv, newSVuv(i), 0);
 
-        if ((val = hv_fetch(index, "default", 7, 0))) {
+        if ((val = hv_fetchs(index, "default", 0))) {
             if (SvTRUE(*val)) {
                 if (has_default)
                     croak("only one default index allowed");
@@ -1404,6 +1456,7 @@ BOOT:
 #ifdef WITH_CP1251
     MY_CXT.cp1251 = tbxs_find_cp1251();
 #endif
+    SHARED_KEYS_INIT;
 #ifdef WITH_MATH_INT64
     PERL_MATH_INT64_LOAD_OR_CROAK;
 #endif
