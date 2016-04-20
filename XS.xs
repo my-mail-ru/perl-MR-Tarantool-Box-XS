@@ -1132,7 +1132,8 @@ static tbxs_data_t *tbxs_context_init(SV *instance, SV *request) {
     SV *key = context->type == EXEC_LUA ? MY_CXT.keys.function : MY_CXT.keys.namespace;
     HE *he = hv_fetch_ent((HV *)SvRV(request), key, 0, 0);
     SV *inst = he ? HeVAL(he) : instance;
-    if (!instance) croak("\"%s\" should be specified", SvPV_nolen(key));
+    if (!inst)
+        croak("\"%s\" should be specified", SvPV_nolen(key));
     context->instance = SvREFCNT_inc(inst);
     context->inst = context->type == EXEC_LUA ? tbfunc_inst(inst) : tbns_inst(inst);
 
