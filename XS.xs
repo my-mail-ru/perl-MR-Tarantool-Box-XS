@@ -1340,8 +1340,10 @@ static void tbns_set_indexes(tbns_t *ns, AV *indexes) {
             AV *fields = newAV();
             av_extend(fields, av_len(idkeys));
             for (I32 j = 0; j <= av_len(idkeys); j++) {
-                SV **val = av_fetch(ns->tuple.fields, j, 0);
-                if (!val) croak("field in index %"IVdf" has no name", i);
+                SV **val = av_fetch(idkeys, j, 0);
+                IV id = SvIV(*val);
+                val = av_fetch(ns->tuple.fields, id, 0);
+                if (!val) croak("field in index %"IVdf" has no name", id);
                 (void)av_store(fields, j, SvREFCNT_inc(*val));
             }
             (void)av_store(ns->index_fields, i, newRV_noinc((SV *)fields));
