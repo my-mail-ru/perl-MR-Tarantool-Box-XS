@@ -152,6 +152,16 @@ static void tbxs_callback(iproto_message_t *message) {
     } while (0)
 #endif
 
+#define tbxs_check_size(type, size, errsv) \
+    do { \
+        if (size != sizeof(type)) { \
+            sv_setpvf(errsv, "invalid field size %"UVuf" for "#type, (UV)size); \
+            sv_setuv(errsv, ERR_CODE_INVALID_RESPONSE); \
+            SvPOK_on(errsv); \
+            return NULL; \
+        } \
+    } while (0)
+
 #ifdef WITH_CP1251
 static SV *tbxs_find_cp1251(void) {
     require_pv("Encode.pm");
@@ -325,41 +335,50 @@ static void *tbxs_sv_to_field(char format, SV *value, size_t *size, SV *errsv, b
     return data;
 }
 
-// TODO check data size
-static SV *tbxs_field_to_sv(char format, void *data, size_t size) {
+static SV *tbxs_field_to_sv(char format, void *data, size_t size, SV *errsv) {
     SV *sv;
     switch (format) {
 #ifdef WITH_MATH_INT64
         case 'Q':
+            tbxs_check_size(uint64_t, size, errsv);
             sv = newSVu64(*(uint64_t *)data);
             break;
         case 'q':
+            tbxs_check_size(int64_t, size, errsv);
             sv = newSVi64(*(int64_t *)data);
             break;
 #elif defined(HAS_QUAD) && IVSIZE >= I64SIZE
         case 'Q':
+            tbxs_check_size(uint64_t, size, errsv);
             sv = newSVuv(*(uint64_t *)data);
             break;
         case 'q':
+            tbxs_check_size(int64_t, size, errsv);
             sv = newSViv(*(int64_t *)data);
             break;
 #endif
         case 'L':
+            tbxs_check_size(uint32_t, size, errsv);
             sv = newSVuv(*(uint32_t *)data);
             break;
         case 'l':
+            tbxs_check_size(int32_t, size, errsv);
             sv = newSViv(*(int32_t *)data);
             break;
         case 'S':
+            tbxs_check_size(uint16_t, size, errsv);
             sv = newSVuv(*(uint16_t *)data);
             break;
         case 's':
+            tbxs_check_size(int16_t, size, errsv);
             sv = newSViv(*(int16_t *)data);
             break;
         case 'C':
+            tbxs_check_size(uint8_t, size, errsv);
             sv = newSVuv(*(uint8_t *)data);
             break;
         case 'c':
+            tbxs_check_size(int8_t, size, errsv);
             sv = newSViv(*(int8_t *)data);
             break;
         case '&':
@@ -460,7 +479,7 @@ static tarantoolbox_tuple_t *tbxs_sv_to_tuple(SV *sv, tbtupleconf_t *conf, SV *e
     }
 }
 
-static AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv) {
+static AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv, SV *errsv) {
     STRLEN formatlen;
     char *format = formatsv ? SvPV(formatsv, formatlen) : NULL;
     AV *tupleav = newAV();
@@ -471,7 +490,11 @@ static AV *tbxs_tuple_to_av(tarantoolbox_tuple_t *tuple, SV *formatsv) {
         void *data = tarantoolbox_tuple_get_field(tuple, j, &size);
         SV *sv;
         if (format && j < formatlen) {
-            sv = tbxs_field_to_sv(format[j], data, size);
+            sv = tbxs_field_to_sv(format[j], data, size, errsv);
+            if (sv == NULL) {
+                SvREFCNT_dec(tupleav);
+                return NULL;
+            }
         } else {
             sv = newSVpvn(data, size);
         }
@@ -1073,7 +1096,11 @@ static void tbxs_selected_message_response(tbxs_data_t *context, HV *result) {
     for (uint32_t i = 0; i < ntuples; i++) {
         tbtupleconf_t *conf = &conf_start[conf_num];
         tarantoolbox_tuple_t *tuple = tarantoolbox_tuples_get_tuple(tuples, i);
-        AV *tupleav = tbxs_tuple_to_av(tuple, conf->format);
+        AV *tupleav = tbxs_tuple_to_av(tuple, conf->format, context->error);
+        if (tupleav == NULL) {
+            SvREFCNT_dec(tuplessv);
+            return;
+        }
 
         SV *tuplesv;
         if (conf->fields && !want_raw) {
@@ -1107,7 +1134,9 @@ static void tbxs_affected_message_response(tbxs_data_t *context, HV *result) {
     uint32_t ntuples = tarantoolbox_tuples_get_count(tuples);
     SV *tuplesv;
     if (tarantoolbox_tuples_has_tuples(tuples) && ntuples == 1) {
-        AV *tupleav = tbxs_tuple_to_av(tarantoolbox_tuples_get_tuple(tuples, 0), ns->tuple.format);
+        AV *tupleav = tbxs_tuple_to_av(tarantoolbox_tuples_get_tuple(tuples, 0), ns->tuple.format, context->error);
+        if (tupleav == NULL)
+            return;
         SV *tupleahv = ns->tuple.fields && !tbxs_fetch_raw(reqhv) ? (SV *)tbxs_tuple_av_to_hv(tupleav, ns->tuple.fields) : (SV *)tupleav;
         tuplesv = newRV_noinc(tupleahv);
     } else {

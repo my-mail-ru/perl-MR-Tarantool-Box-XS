@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 121;
+use Test::More tests => 122;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use Getopt::Long;
@@ -637,6 +637,26 @@ sub check_pack {
         is($resp->{tuple}->{Str}, Encode::encode('cp1251', "Строка"), "string returned from utf8 field is in cp1251");
         $resp = $ns->do({ type => 'select', keys => [ $TEST3_ID ] });
         is($resp->{tuples}->[0]->{Str}, Encode::encode('utf8', "Строка"), "string in utf8 field is realy in utf8");
+    }
+
+    {
+        my $wrong_ns = MR::Tarantool::Box::XS->new(
+            iproto    => $shard_iproto,
+            namespace => 23,
+            format    => 'l $l Ss Cc &$' . ($math_int64 ? 'Qq' : ''),
+            fields    => [qw/ ID UInt32 Int32 UInt16 Int16 UInt8 Int8 String Utf8String /, $math_int64 ? qw/UInt64 Int64/ : ()],
+            indexes   => [ { name => 'id', keys => ['ID'] } ],
+        );
+        $wrong_ns->do({
+            type => 'update',
+            key  => $TEST3_ID,
+            ops  => [ [ UInt32 => set => "" ] ],
+        });
+        my $resp = $ns->do({
+            type => 'select',
+            keys => [ $TEST3_ID ],
+        });
+        cmp_ok($resp->{error}, '==', MR::Tarantool::Box::XS::ERR_CODE_INVALID_RESPONSE, "invalid integer type field size");
     }
 
     $resp = $ns->bulk([{
